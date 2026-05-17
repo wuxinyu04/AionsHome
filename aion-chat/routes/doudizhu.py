@@ -17,7 +17,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 from ai_providers import CLI_STATUS_PREFIX, stream_ai
-from chatroom import build_aion_group_context, build_connor_group_context, load_chatroom_config, stream_connor_cli
+from chatroom import build_aion_group_context, build_connor_group_context, get_chatroom_names, load_chatroom_config, stream_connor_cli
 from config import DATA_DIR, DEFAULT_MODEL, SETTINGS
 from database import get_db
 from tts import TTSStreamer
@@ -28,13 +28,22 @@ router = APIRouter(prefix="/api/doudizhu", tags=["doudizhu"])
 
 STATE_PATH = DATA_DIR / "doudizhu_state.json"
 PLAYERS = ["user", "aion", "connor"]
-PLAYER_NAMES = {"user": "Ithil", "aion": "Aion", "connor": "Connor"}
+DEFAULT_PLAYER_NAMES = {"user": "用户", "aion": "AI", "connor": "Connor"}
 RANKS = ["3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A", "2", "BJ", "RJ"]
 SUITS = ["S", "H", "C", "D"]
 RANK_VALUE = {rank: i for i, rank in enumerate(RANKS)}
 SUIT_VALUE = {"S": 0, "H": 1, "C": 2, "D": 3}
 AI_TIMEOUT_SECONDS = 240
 _state_lock = asyncio.Lock()
+
+
+def _player_names() -> dict[str, str]:
+    user_name, ai_name, connor_name = get_chatroom_names()
+    return {"user": user_name, "aion": ai_name, "connor": connor_name}
+
+
+def _player_name(player: str) -> str:
+    return _player_names().get(player, DEFAULT_PLAYER_NAMES.get(player, player))
 
 
 class NewGameBody(BaseModel):
@@ -131,7 +140,7 @@ def _public_state(state: dict, for_player: Optional[str] = None) -> dict:
         hand = state["hands"].get(p, [])
         players[p] = {
             "id": p,
-            "name": PLAYER_NAMES[p],
+            "name": _player_name(p),
             "role": "landlord" if state.get("landlord") == p else "farmer",
             "handCount": len(hand),
         }
@@ -164,9 +173,9 @@ def _settlement(state: dict) -> dict:
     remaining = {p: len(state.get("hands", {}).get(p, [])) for p in PLAYERS}
     return {
         "winner": state.get("winner"),
-        "winnerName": PLAYER_NAMES.get(state.get("winner"), "未知"),
+        "winnerName": _player_name(state.get("winner")) if state.get("winner") else "未知",
         "landlord": state.get("landlord"),
-        "landlordName": PLAYER_NAMES.get(state.get("landlord"), "未知"),
+        "landlordName": _player_name(state.get("landlord")) if state.get("landlord") else "未知",
         "remainingCounts": remaining,
         "bottomCards": state.get("bottom", []),
         "wallet": state.get("wallet_settlement"),
@@ -525,7 +534,7 @@ def _append_history(state: dict, player: str, event: str, speech: str = "", card
     state.setdefault("history", []).append({
         "ts": time.time(),
         "player": player,
-        "name": PLAYER_NAMES[player],
+        "name": _player_name(player),
         "event": event,
         "speech": (speech or "").strip()[:160],
         "cards": cards or [],
@@ -548,7 +557,7 @@ def _finish_bidding(state: dict):
     state["hands"][landlord] = _sort_cards(state["hands"][landlord] + state["bottom"])
     state["phase"] = "playing"
     state["current_player"] = landlord
-    _append_history(state, landlord, "landlord", f"{PLAYER_NAMES[landlord]} 成为地主，底牌公开。", state["bottom"], best["bid"])
+    _append_history(state, landlord, "landlord", f"{_player_name(landlord)} 成为地主，底牌公开。", state["bottom"], best["bid"])
 
 
 def apply_bid(state: dict, player: str, bid: int, speech: str = ""):
@@ -558,7 +567,7 @@ def apply_bid(state: dict, player: str, bid: int, speech: str = ""):
     if bid != 0 and bid <= state.get("current_bid", 0):
         bid = 0
 
-    state["bids"].append({"player": player, "name": PLAYER_NAMES[player], "bid": bid, "speech": speech})
+    state["bids"].append({"player": player, "name": _player_name(player), "bid": bid, "speech": speech})
     state["current_bid"] = max(state.get("current_bid", 0), bid)
     state["bid_turns"] += 1
     _append_history(state, player, "bid", speech or ("不叫" if bid == 0 else f"叫 {bid} 分"), bid=bid)
@@ -584,7 +593,7 @@ def apply_play(state: dict, player: str, action: str, cards: list[str], speech: 
             state["current_player"] = starter
             state["last_play"] = None
             state["passes"] = []
-            _append_history(state, starter, "trick_reset", f"一轮结束，{PLAYER_NAMES[starter]} 重新出牌。")
+            _append_history(state, starter, "trick_reset", f"一轮结束，{_player_name(starter)} 重新出牌。")
         else:
             state["current_player"] = _next_player(state, player)
         return
@@ -604,14 +613,14 @@ def apply_play(state: dict, player: str, action: str, cards: list[str], speech: 
     for card in cards:
         state["hands"][player].remove(card)
     state["played_cards"].extend(cards)
-    state["last_play"] = {"player": player, "name": PLAYER_NAMES[player], "cards": cards, **move_type}
+    state["last_play"] = {"player": player, "name": _player_name(player), "cards": cards, **move_type}
     state["passes"] = []
     _append_history(state, player, "play", speech, cards)
 
     if not state["hands"][player]:
         state["phase"] = "game_over"
         state["winner"] = player
-        _append_history(state, player, "win", speech or f"{PLAYER_NAMES[player]} 出完了。")
+        _append_history(state, player, "win", speech or f"{_player_name(player)} 出完了。")
     else:
         state["current_player"] = _next_player(state, player)
 
@@ -665,7 +674,7 @@ def _format_settlement_message(state: dict) -> str:
         "【斗地主战报】",
         f"本局赢家：{settle['winnerName']}",
         f"地主：{settle['landlordName']}",
-        "剩余手牌：" + "，".join(f"{PLAYER_NAMES[p]} {remaining.get(p, 0)} 张" for p in PLAYERS if p != settle["winner"]),
+        "剩余手牌：" + "，".join(f"{_player_name(p)} {remaining.get(p, 0)} 张" for p in PLAYERS if p != settle["winner"]),
     ]
     wallet = state.get("wallet_settlement") or {}
     wallet_lines = wallet.get("lines") or []
@@ -716,7 +725,7 @@ async def _apply_wallet_settlement(state: dict):
     for p in PLAYERS:
         value = deltas[p]
         sign = "+" if value > 0 else ""
-        lines.append(f"{PLAYER_NAMES[p]} {sign}{fmt_amount(value)} 元")
+        lines.append(f"{_player_name(p)} {sign}{fmt_amount(value)} 元")
 
     for player, record_type in ai_wallet.items():
         amount = deltas[player]
@@ -727,7 +736,7 @@ async def _apply_wallet_settlement(state: dict):
             f"ddz_{state['id']}_{player}_wallet",
             record_type,
             amount,
-            f"斗地主阵营结算{verb}：{PLAYER_NAMES[player]} {fmt_amount(amount)} 元",
+            f"斗地主阵营结算{verb}：{_player_name(player)} {fmt_amount(amount)} 元",
             now,
         ))
 
@@ -783,7 +792,7 @@ def _game_prompt(state: dict, player: str, moves: Optional[list[dict]] = None) -
     public = _public_state(state, for_player=player)
     private = {
         "you": player,
-        "yourName": PLAYER_NAMES[player],
+        "yourName": _player_name(player),
         "yourHand": state["hands"][player],
         "publicState": public,
     }
@@ -813,7 +822,7 @@ def _game_prompt(state: dict, player: str, moves: Optional[list[dict]] = None) -
 
     return (
         "[斗地主牌局任务]\n"
-        "你正在和 Ithil、Aion、Connor 玩一局真实斗地主。你必须保持原本人设和说话风格，但本次回复只允许输出一个 JSON 对象。\n"
+        f"你正在和 {_player_name('user')}、{_player_name('aion')}、{_player_name('connor')} 玩一局真实斗地主。你必须保持原本人设和说话风格，但本次回复只允许输出一个 JSON 对象。\n"
         "不要输出 Markdown，不要解释，不要把 JSON 包在代码块里，不要泄露思考过程。禁止调用任何工具，直接回复。\n"
         "服务端会校验你的动作；你不知道其他玩家未出的手牌，只能根据自己的手牌和公共信息判断。\n\n"
         "出牌时请优先参考 recommendedMove。重点：残局要阻截，农民要配合强势队友，但不要把回合轻易还给地主；炸弹/王炸是关键资源，只在阻截、残局或能赢时使用。\n\n"
@@ -961,7 +970,7 @@ async def start_game():
         state["last_play"] = None
         state["passes"] = []
         state["updated_at"] = time.time()
-        _append_history(state, "user", "start", "确认开局，由 Ithil 先叫地主。")
+        _append_history(state, "user", "start", f"确认开局，由 {_player_name('user')} 先叫地主。")
         _save_state(state)
         return {"ok": True, "state": _public_state(state)}
 

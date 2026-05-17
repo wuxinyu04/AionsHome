@@ -43,6 +43,20 @@ def save_chatroom_config(data: dict):
     CHATROOM_CONFIG_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def get_chatroom_names() -> tuple[str, str, str]:
+    wb = load_worldbook()
+    cfg = load_chatroom_config()
+    user_name = wb.get("user_name") or "用户"
+    ai_name = wb.get("ai_name") or "AI"
+    connor_name = cfg.get("connor_name") or "Connor"
+    return user_name, ai_name, connor_name
+
+
+def display_name_for_sender(sender: str) -> str:
+    user_name, ai_name, connor_name = get_chatroom_names()
+    return {"user": user_name, "assistant": ai_name, "aion": ai_name, "connor": connor_name}.get(sender, sender)
+
+
 # ══════════════════════════════════════════════════
 #  Connor 代理调用
 # ══════════════════════════════════════════════════
@@ -234,7 +248,7 @@ def format_cross_context(messages: list[dict], label: str) -> str:
     for m in messages:
         ts = time.strftime("%H:%M", time.localtime(m.get("created_at", 0)))
         role = m.get("role") or m.get("sender", "unknown")
-        name = {"user": "用户", "assistant": "Aion", "aion": "Aion", "connor": "Connor"}.get(role, role)
+        name = display_name_for_sender(role)
         text = (m.get("content") or "")[:300]
         lines.append(f"  [{ts}] {name}: {text}")
     return "\n".join(lines)
@@ -365,9 +379,7 @@ async def fetch_chatroom_source_details(memories: list[dict], keywords: list[str
         return ""
 
     wb = load_worldbook()
-    user_name = wb.get("user_name", "用户")
-    ai_name = wb.get("ai_name", "AI")
-    connor_name = load_chatroom_config().get("connor_name", "Connor")
+    user_name, ai_name, connor_name = get_chatroom_names()
     kw_lower = [k.lower() for k in keywords if k.strip()]
     if not kw_lower:
         return ""
@@ -495,14 +507,12 @@ async def digest_chatroom(room_id: str = None, model_key: str = None) -> dict:
         # 按时间排序合并
         msgs.sort(key=lambda x: x["created_at"])
 
-    if len(msgs) < 8:
-        return {"ok": False, "message": f"消息不足（{len(msgs)}条），至少需要 8 条"}
+    if len(msgs) < 30:
+        return {"ok": False, "message": f"消息不足（{len(msgs)}条），至少需要 30 条"}
 
     # 读取世界书人设
     wb = load_worldbook()
-    user_name = wb.get("user_name", "用户")
-    ai_name = wb.get("ai_name", "AI")
-    connor_name = load_chatroom_config().get("connor_name", "Connor")
+    user_name, ai_name, connor_name = get_chatroom_names()
 
     # 构建人设前缀（Connor 已有自身人设，这里注入 Aion 和用户信息供参考）
     persona_block = ""
@@ -654,21 +664,19 @@ async def digest_chatroom(room_id: str = None, model_key: str = None) -> dict:
     # ── 礼物判断：Connor 总结完成后让 Connor 决定是否送礼 ──
     if target_room_id and total_new > 0 and all_summaries:
         try:
-            # 获取 Connor 近期聊天上下文
-            async with get_db() as db:
-                db.row_factory = aiosqlite.Row
-                cur = await db.execute(
-                    "SELECT sender, content FROM chatroom_messages "
-                    "WHERE room_id = ? AND sender != 'system' "
-                    "ORDER BY created_at DESC LIMIT 30",
-                    (target_room_id,),
-                )
-                recent_rows = list(reversed(await cur.fetchall()))
-            context_msgs = [
-                {"role": "assistant" if r["sender"] == "connor" else "user",
-                 "content": r["content"][:300]}
-                for r in recent_rows
-            ]
+            # 使用本轮已按时间合并的新增消息，避免只取 Connor 私聊导致礼物滞后到旧私聊话题。
+            context_msgs = []
+            for m in msgs[-30:]:
+                content = (m.get("content") or "").strip()
+                if not content:
+                    continue
+                source_label = "群聊" if m.get("_source") == "group" else "私聊"
+                ts = time.strftime("%m-%d %H:%M", time.localtime(m["created_at"]))
+                name = {"user": user_name, "aion": ai_name, "connor": connor_name}.get(m["sender"], m["sender"])
+                context_msgs.append({
+                    "role": "user",
+                    "content": f"[{ts}][{source_label}] {name}: {content[:300]}",
+                })
 
             connor_persona_text = _read_connor_persona()
             connor_persona_block = ""
@@ -737,7 +745,7 @@ async def build_aion_group_context(
 
     # 0. 注入世界书（和主聊天一致的人设）
     wb = load_worldbook()
-    user_name = wb.get("user_name", "用户")
+    user_name, ai_name, connor_name = get_chatroom_names()
     if wb.get("ai_persona"):
         history.append({"role": "user", "content": f"[系统设定 - AI人设]\n{wb['ai_persona']}"})
         history.append({"role": "assistant", "content": "收到，我会按照设定扮演角色。"})
@@ -788,8 +796,8 @@ async def build_aion_group_context(
     # 5. 群聊说明
     history.append({"role": "user", "content": (
         "[群聊说明]\n"
-        "你现在在一个三人群聊中，参与者：用户（Ithil）、你（Aion）、Connor。\n"
-        "Connor 是另一个 AI 伴侣。请自然地参与群聊对话，可以回应用户也可以和 Connor 交流。\n"
+        f"你现在在一个三人群聊中，参与者：用户（{user_name}）、你（{ai_name}）、{connor_name}。\n"
+        f"{connor_name} 是另一个 AI 伴侣。请自然地参与群聊对话，可以回应用户也可以和 {connor_name} 交流。\n"
         "回复时直接说话即可，不需要加前缀标记自己的身份。\n"
         "以下对话记录按时间线排列，可能包含私聊和群聊的混合内容。"
     )})
@@ -820,7 +828,7 @@ async def build_connor_group_context(
     history = []
 
     wb = load_worldbook()
-    user_name = wb.get("user_name", "用户")
+    user_name, ai_name, connor_name = get_chatroom_names()
 
     # 0. Connor 人设
     connor_full_persona = connor_persona or _read_connor_persona()
@@ -874,8 +882,8 @@ async def build_connor_group_context(
     # 4. 群聊说明
     history.append({"role": "user", "content": (
         "[群聊说明]\n"
-        "你现在在一个三人群聊中，参与者：用户（Ithil）、Aion（另一个AI）、你（Connor）。\n"
-        "请自然地参与群聊对话，可以回应用户也可以和 Aion 交流。\n"
+        f"你现在在一个三人群聊中，参与者：用户（{user_name}）、{ai_name}（另一个AI）、你（{connor_name}）。\n"
+        f"请自然地参与群聊对话，可以回应用户也可以和 {ai_name} 交流。\n"
         "回复时直接说话即可，不需要加前缀标记。\n"
         "以下对话记录按时间线排列，可能包含私聊和群聊的混合内容。"
     )})
@@ -904,7 +912,7 @@ async def build_connor_1v1_context(
     messages = []
 
     wb = load_worldbook()
-    user_name = wb.get("user_name", "用户")
+    user_name, _, _ = get_chatroom_names()
 
     # 角色设定、用户信息、能力等作为前缀消息对
     if connor_persona:
@@ -970,7 +978,7 @@ async def build_connor_1v1_context(
 
 
 # ══════════════════════════════════════════════════
-#  Connor 自动总结（1 小时无新消息自动触发，涵盖私聊+群聊）
+#  Connor 自动总结（30 分钟无新消息自动触发，涵盖私聊+群聊）
 # ══════════════════════════════════════════════════
 
 _connor_last_msg_ts: float = 0.0       # 最后一条 Connor 相关消息的时间
@@ -978,14 +986,14 @@ _connor_digest_armed: bool = False     # 是否有待总结的新消息
 
 
 def connor_1v1_on_message():
-    """Connor 相关聊天产生新消息时调用（私聊或群聊），重置 1 小时冷却"""
+    """Connor 相关聊天产生新消息时调用（私聊或群聊），重置 30 分钟冷却"""
     global _connor_last_msg_ts, _connor_digest_armed
     _connor_last_msg_ts = time.time()
     _connor_digest_armed = True
 
 
 async def _connor_1v1_auto_digest_loop():
-    """后台循环：每 5 分钟检查一次，若 Connor 相关聊天已 1 小时无新消息则自动总结"""
+    """后台循环：每 5 分钟检查一次，若 Connor 相关聊天已 30 分钟无新消息则自动总结"""
     global _connor_digest_armed
     while True:
         await asyncio.sleep(5 * 60)
@@ -995,7 +1003,7 @@ async def _connor_1v1_auto_digest_loop():
             if _connor_last_msg_ts == 0:
                 continue
             elapsed = time.time() - _connor_last_msg_ts
-            if elapsed < 60 * 60:
+            if elapsed < 30 * 60:
                 continue
             print(f"[chatroom_auto_digest] Connor 相关聊天已 {elapsed/60:.0f} 分钟无新消息，开始自动总结")
             result = await digest_chatroom()

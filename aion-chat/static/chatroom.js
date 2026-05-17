@@ -17,6 +17,40 @@ const AVATARS = {
   connor: '/public/codexicon.png',
 };
 
+let crUserName = '我';
+let crAiName = 'AI';
+let crConnorName = 'Connor';
+
+function crName(sender) {
+  return { user: crUserName || '我', aion: crAiName || 'AI', connor: crConnorName || 'Connor' }[sender] || sender;
+}
+
+function applyChatroomNames(cfg = {}) {
+  crAiName = cfg.ai_name || crAiName || 'AI';
+  crUserName = cfg.user_name || crUserName || '我';
+  crConnorName = cfg.connor_name || crConnorName || 'Connor';
+
+  const aionPersonaLabel = document.querySelector('#fieldAionPersona label');
+  if (aionPersonaLabel) aionPersonaLabel.textContent = `${crAiName} 人设`;
+  const connorPersona = document.getElementById('setConnorPersona');
+  if (connorPersona?.previousElementSibling) connorPersona.previousElementSibling.textContent = `${crConnorName} 补充设定（可选）`;
+  const connorNameInput = document.getElementById('setConnorName');
+  if (connorNameInput?.previousElementSibling) {
+    connorNameInput.previousElementSibling.textContent = `${crConnorName} 名字`;
+    connorNameInput.placeholder = crConnorName;
+  }
+  const aionVoice = document.getElementById('setTtsAionVoice');
+  if (aionVoice?.previousElementSibling) aionVoice.previousElementSibling.textContent = `${crAiName} 音色`;
+  const connorVoice = document.getElementById('setTtsConnorVoice');
+  if (connorVoice?.previousElementSibling) connorVoice.previousElementSibling.textContent = `${crConnorName} 音色`;
+  const walletTitle = document.querySelector('.wallet-panel-header span');
+  if (walletTitle) walletTitle.textContent = `💰 ${crConnorName} 的钱包`;
+  const optAion = document.getElementById('optAion');
+  if (optAion) optAion.textContent = `${crAiName} 优先`;
+  const optConnor = document.getElementById('optConnor');
+  if (optConnor) optConnor.textContent = `${crConnorName} 优先`;
+}
+
 // ── 音效 ──
 const sndSend = new Audio('/public/发送消息.mp3');
 const sndRecv = new Audio('/public/收到消息.mp3');
@@ -504,7 +538,7 @@ function renderMessages(msgs) {
     messagesEl.innerHTML = `
       <div class="empty-state">
         <div class="icon">${currentRoom.type === 'connor_1v1' ? '🤖' : '👥'}</div>
-        <div>${currentRoom.type === 'connor_1v1' ? '和 Connor 开始私聊吧' : '三人群聊，开始吧'}</div>
+        <div>${currentRoom.type === 'connor_1v1' ? `和 ${esc(crConnorName)} 开始私聊吧` : '三人群聊，开始吧'}</div>
       </div>`;
     return;
   }
@@ -519,8 +553,7 @@ function msgHTML(m) {
     return `<div class="system-event-msg" data-msg-id="${m.id || ''}">${esc(m.content || '')}</div>`;
   }
 
-  const senderNames = { user: '我', aion: 'Aion', connor: 'Connor' };
-  const name = senderNames[sender] || sender;
+  const name = crName(sender);
   const avatar = AVATARS[sender] || AVATARS.user;
   const time = timeStr(m.created_at);
 
@@ -661,8 +694,7 @@ let pendingStreamId = null;
 
 function startStreamingBubble(sender, id) {
   streamingText = '';
-  const senderNames = { aion: 'Aion', connor: 'Connor' };
-  const name = senderNames[sender] || sender;
+  const name = crName(sender);
   const avatar = AVATARS[sender] || AVATARS.user;
 
   // 移除 typing
@@ -801,13 +833,13 @@ composer.addEventListener('submit', async (e) => {
 function handleSSE(data) {
   switch (data.type) {
     case 'aion_start':
-      appendTyping('Aion');
+      appendTyping(crName('aion'));
       // 延迟创建流式气泡，等第一个 chunk 到达时再创建
       pendingStreamSender = 'aion';
       pendingStreamId = data.id;
       break;
     case 'aion_status':
-      updateTypingStatus('Aion', data.text);
+      updateTypingStatus(crName('aion'), data.text);
       break;
     case 'aion_chunk':
       if (pendingStreamSender && !streamingBubble) {
@@ -828,12 +860,12 @@ function handleSSE(data) {
       playRecv();
       break;
     case 'connor_start':
-      appendTyping('Connor');
+      appendTyping(crName('connor'));
       pendingStreamSender = 'connor';
       pendingStreamId = data.id;
       break;
     case 'connor_status':
-      updateTypingStatus('Connor', data.text);
+      updateTypingStatus(crName('connor'), data.text);
       break;
     case 'connor_chunk':
       if (pendingStreamSender && !streamingBubble) {
@@ -980,6 +1012,7 @@ async function openSettings() {
     api('/config'),
     crLoadTTSVoices(),
   ]);
+  applyChatroomNames(cfg);
 
   document.getElementById('setTitle').value = room.title || '';
   document.getElementById('setAionPersona').value = room.aion_persona || '';
@@ -989,8 +1022,8 @@ async function openSettings() {
   document.getElementById('setConnorName').value = cfg.connor_name || 'Connor';
 
   // 回复顺序选项：用世界书和配置中的名字
-  const aionName = cfg.ai_name || 'Aion';
-  const connorName = cfg.connor_name || 'Connor';
+  const aionName = crAiName;
+  const connorName = crConnorName;
   document.getElementById('optAion').textContent = `${aionName} 优先`;
   document.getElementById('optConnor').textContent = `${connorName} 优先`;
   document.getElementById('setReplyOrder').value = cfg.reply_order || 'random';
@@ -1022,15 +1055,19 @@ async function saveSettings() {
   });
 
   // 保存 Connor 配置
+  const nextConnorName = document.getElementById('setConnorName')?.value || crConnorName;
   await api('/config', {
     method: 'PUT',
     body: JSON.stringify({
-      connor_name: document.getElementById('setConnorName')?.value || undefined,
+      connor_name: nextConnorName || undefined,
       tts_aion_voice: document.getElementById('setTtsAionVoice').value,
       tts_connor_voice: document.getElementById('setTtsConnorVoice').value,
       reply_order: document.getElementById('setReplyOrder').value,
     }),
   });
+  applyChatroomNames({ connor_name: nextConnorName });
+  await loadMessages();
+  checkConnor();
 
   // 同步本地变量
   crTtsAionVoice = document.getElementById('setTtsAionVoice').value;
@@ -1213,10 +1250,10 @@ async function checkConnor() {
     const result = await api('/connor-status');
     const online = result.online;
     connorDot.className = `connor-dot ${online ? 'online' : ''}`;
-    connorStatusEl.textContent = `Connor: ${online ? '在线' : '离线'}`;
+    connorStatusEl.textContent = `${crConnorName}: ${online ? '在线' : '离线'}`;
   } catch {
     connorDot.className = 'connor-dot';
-    connorStatusEl.textContent = 'Connor: 离线';
+    connorStatusEl.textContent = `${crConnorName}: 离线`;
   }
 }
 
@@ -2106,7 +2143,7 @@ function crCloseWhisper() { document.getElementById('crWhisperModal').classList.
 // ══════════════════════════════════════════════════
 
 function crOpenTransferDialog() {
-  document.getElementById('crTransferDialogTitle').textContent = '给【Connor】转账';
+  document.getElementById('crTransferDialogTitle').textContent = `给【${crConnorName}】转账`;
   document.getElementById('crTransferAmountInput').value = '';
   document.getElementById('crTransferDialogOverlay').classList.add('show');
   setTimeout(() => document.getElementById('crTransferAmountInput').focus(), 100);
@@ -2148,7 +2185,7 @@ async function crOpenWalletPanel() {
         const sign = tx.amount >= 0 ? '+' : '';
         const cls = tx.amount >= 0 ? 'positive' : 'negative';
         const uName = '用户';
-        let desc = tx.description || (isAi ? 'Connor转账' : `${uName}转账`);
+        let desc = tx.description || (isAi ? `${crConnorName}转账` : `${uName}转账`);
         return `<div class="wallet-tx-item"><div><div class="wallet-tx-desc">${esc(desc)}</div><div class="wallet-tx-time">${timeStr}</div></div><div class="wallet-tx-amount ${cls}">${sign}${tx.amount.toFixed(2)}</div></div>`;
       }).join('');
     }
@@ -2211,6 +2248,7 @@ function crToyCloseEditor() { document.getElementById('crToyEditorOverlay').clas
   // 从服务端加载 TTS 配置，所有窗口共享同一份
   try {
     const cfg = await api('/config');
+    applyChatroomNames(cfg);
     crTtsEnabled = !!cfg.tts_enabled;
     crTtsAionVoice = cfg.tts_aion_voice || '';
     crTtsConnorVoice = cfg.tts_connor_voice || '';

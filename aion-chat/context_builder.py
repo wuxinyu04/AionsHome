@@ -66,6 +66,19 @@ def _is_pet_available() -> bool:
     return bool(SETTINGS.get("pet_enabled", False) and manager.has_active_pet())
 
 
+def _timeline_display_names() -> tuple[str, str, str]:
+    wb = load_worldbook()
+    user_name = wb.get("user_name") or "用户"
+    ai_name = wb.get("ai_name") or "AI"
+    connor_name = "Connor"
+    try:
+        from chatroom import load_chatroom_config
+        connor_name = load_chatroom_config().get("connor_name") or "Connor"
+    except Exception:
+        pass
+    return user_name, ai_name, connor_name
+
+
 async def build_ability_block(
     user_name: str,
     *,
@@ -471,6 +484,7 @@ def render_merged_timeline(
     if not merged:
         return []
 
+    _, ai_name, connor_name = _timeline_display_names()
     sources = set(m["source"] for m in merged)
     has_mixed = len(sources) > 1
 
@@ -534,7 +548,7 @@ def render_merged_timeline(
                 role = "user"
             else:
                 # 对方 AI
-                other_name = "Connor" if who == "aion" else "Aion"
+                other_name = connor_name if who == "aion" else ai_name
                 content = f"[{other_name}]: {content}"
                 role = "user"
 

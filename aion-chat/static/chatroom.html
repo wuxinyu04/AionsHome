@@ -36,7 +36,7 @@
       </div>
       <div class="sidebar-footer">
         <span class="connor-dot" id="connorDot"></span>
-        <span id="connorStatus">Connor: 检查中...</span>
+        <span id="connorStatus">检查中...</span>
       </div>
     </div>
     <div class="sidebar-backdrop" id="sidebarBackdrop"></div>
@@ -95,11 +95,11 @@
           <input id="setTitle" type="text">
         </div>
         <div class="field" id="fieldAionPersona">
-          <label>Aion 人设</label>
-          <textarea id="setAionPersona" placeholder="Aion 在此房间使用的人设..."></textarea>
+          <label>AI 人设</label>
+          <textarea id="setAionPersona" placeholder="AI 在此房间使用的人设..."></textarea>
         </div>
         <div class="field">
-          <label>Connor 补充设定（可选）</label>
+          <label>第二位 AI 补充设定（可选）</label>
           <textarea id="setConnorPersona" placeholder="留空则使用 persona.md 默认人设，此处可追加房间专属指令..."></textarea>
         </div>
         <div class="field">
@@ -114,13 +114,13 @@
           <label>群聊回复顺序</label>
           <select id="setReplyOrder">
             <option value="random">随机</option>
-            <option value="aion" id="optAion">Aion 优先</option>
-            <option value="connor" id="optConnor">Connor 优先</option>
+            <option value="aion" id="optAion">AI 优先</option>
+            <option value="connor" id="optConnor">第二位 AI 优先</option>
           </select>
         </div>
         <div class="field">
-          <label>Connor 名字</label>
-          <input id="setConnorName" type="text" placeholder="Connor">
+          <label>第二位 AI 名字</label>
+          <input id="setConnorName" type="text" placeholder="第二位 AI">
         </div>
         <div style="margin-top:12px; border-top:1px solid var(--border); padding-top:12px;">
           <div class="field tts-toggle-row">
@@ -131,11 +131,11 @@
             </label>
           </div>
           <div class="field">
-            <label>Aion 音色</label>
+            <label>AI 音色</label>
             <select id="setTtsAionVoice"></select>
           </div>
           <div class="field">
-            <label>Connor 音色</label>
+            <label>第二位 AI 音色</label>
             <select id="setTtsConnorVoice"></select>
           </div>
         </div>
@@ -254,7 +254,7 @@
   <!-- Connor 转账弹窗 -->
   <div class="cr-transfer-dialog-overlay" id="crTransferDialogOverlay" onclick="crCloseTransferDialog()">
     <div class="cr-transfer-dialog" onclick="event.stopPropagation()">
-      <div class="cr-transfer-dialog-title" id="crTransferDialogTitle">给【Connor】转账</div>
+      <div class="cr-transfer-dialog-title" id="crTransferDialogTitle">转账</div>
       <input type="number" id="crTransferAmountInput" class="transfer-amount-input" placeholder="输入金额" step="1">
       <div class="cr-transfer-dialog-hint">正数=转账，负数=扣除</div>
       <div class="cr-transfer-dialog-btns">
@@ -268,7 +268,7 @@
   <div class="cr-wallet-panel-overlay" id="crWalletPanelOverlay" onclick="crCloseWalletPanel()">
     <div class="cr-wallet-panel" onclick="event.stopPropagation()">
       <div class="wallet-panel-header">
-        <span>💰 Connor 的钱包</span>
+        <span>💰 第二位 AI 的钱包</span>
         <button class="wallet-close-btn" onclick="crCloseWalletPanel()">✕</button>
       </div>
       <div class="wallet-balance-section connor-wallet-gradient">

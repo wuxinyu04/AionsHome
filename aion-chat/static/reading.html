@@ -629,8 +629,8 @@
 
 <!-- 选中文字浮动工具栏 -->
 <div class="sel-toolbar" id="selToolbar">
-  <button id="selAskAionBtn" onclick="askAIAboutSelection('aion')">💬 问Aion</button>
-  <button id="selAskConnorBtn" class="connor-btn" onclick="askAIAboutSelection('connor')">💬 问Connor</button>
+  <button id="selAskAionBtn" onclick="askAIAboutSelection('aion')">💬 问AI</button>
+  <button id="selAskConnorBtn" class="connor-btn" onclick="askAIAboutSelection('connor')">💬 问第二位AI</button>
   <button id="selAskGroupBtn" class="group-btn" onclick="askAIAboutSelection('group')">💬 群里聊</button>
 </div>
 
@@ -1149,7 +1149,7 @@ async function startAnnotateAll(segments) {
           updateSegBlockStatus(msg.segment_index, 'not_sent');
         }
         else if (msg.type === 'start' && msg.connor_available === false) {
-          showToast('Connor 未接入，仅 Aion 批注');
+          showToast(`${connorName} 未接入，仅 ${aiName} 批注`);
         }
         else if (msg.type === 'done') {
           break;
@@ -1469,7 +1469,7 @@ async function openReplyPanel() {
     } catch(e) {}
 
     if (askTarget === 'connor' && !replyConnorRoomId) {
-      showToast('Connor 未接入，无法使用此功能');
+      showToast(`${connorName} 未接入，无法使用此功能`);
       return false;
     }
     if (askTarget === 'group' && !replyGroupRoomId) {

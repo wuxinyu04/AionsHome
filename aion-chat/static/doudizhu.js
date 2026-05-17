@@ -1,10 +1,19 @@
 const $ = (id) => document.getElementById(id);
 
 const playerNames = {
-  user: "Ithil",
-  aion: "Aion",
-  connor: "Connor",
+  user: "用户",
+  aion: "AI",
+  connor: "第二位 AI",
 };
+
+async function loadPlayerNames() {
+  try {
+    const cfg = await api("/api/chatroom/config");
+    playerNames.user = cfg.user_name || playerNames.user;
+    playerNames.aion = cfg.ai_name || playerNames.aion;
+    playerNames.connor = cfg.connor_name || playerNames.connor;
+  } catch {}
+}
 
 const playerAvatars = {
   aion: "/public/gropicon1.png",
@@ -487,7 +496,7 @@ async function announceSettlement() {
     if (data.state) setState(data.state);
     return;
   }
-  $("settlementStatus").textContent = "已发到最新群聊，Aion 和 Connor 会接着回应。";
+  $("settlementStatus").textContent = `已发到最新群聊，${playerNames.aion} 和 ${playerNames.connor} 会接着回应。`;
   if (data.state) setState(data.state);
 }
 
@@ -558,7 +567,10 @@ $("playBtn").addEventListener("click", () => {
 $("passBtn").addEventListener("click", () => play("pass", []));
 $("hintBtn").addEventListener("click", hint);
 
-connectGameSocket();
-loadState().catch(() => {
-  $("statusLine").textContent = "牌桌加载失败。";
-});
+(async function initDoudizhu() {
+  await loadPlayerNames();
+  connectGameSocket();
+  loadState().catch(() => {
+    $("statusLine").textContent = "牌桌加载失败。";
+  });
+})();

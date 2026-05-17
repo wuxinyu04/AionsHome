@@ -16,6 +16,14 @@ EMBEDDING_MODEL = "gemini-embedding-001"
 EMBEDDING_DIMS = 3072
 
 
+def _connor_display_name() -> str:
+    try:
+        from chatroom import load_chatroom_config
+        return load_chatroom_config().get("connor_name") or "Connor"
+    except Exception:
+        return "Connor"
+
+
 def _pack_embedding(values: list[float]) -> bytes:
     return struct.pack(f'{len(values)}f', *values)
 
@@ -194,11 +202,12 @@ async def fetch_source_details(memories: list[dict], keywords: list[str]) -> str
         print(f"[source_detail] → 关键词 {kw_lower} 命中 {hit_count} 条")
 
     matched_rows.sort(key=lambda r: r["created_at"])
+    connor_name = _connor_display_name()
     detail_lines = []
     for row in matched_rows:
-        sender = row.get("_sender", "")
+        sender = row["_sender"] if "_sender" in row.keys() else ""
         if sender:
-            name = {"user": user_name, "aion": ai_name, "connor": "Connor"}.get(sender, sender)
+            name = {"user": user_name, "aion": ai_name, "connor": connor_name}.get(sender, sender)
         else:
             name = user_name if row["role"] == "user" else ai_name
         detail_lines.append(f"{name}: {row['content'][:500]}")
@@ -383,14 +392,14 @@ async def instant_digest(recent_messages: list[dict]) -> dict:
 
     prompt = (
         f"你是一个 RAG 系统的查询优化路由。分析用户输入，输出 JSON：\n"
-        f"1. 忽略高频对话称呼：不要提取对话者的名字或昵称（如 \"Aion\", \"Ithil\", \"小鬣狗\", \"老公\", \"宝贝\"）作为关键词。\n"
+        f"1. 忽略高频对话称呼：不要提取对话者的名字或昵称（如 \"{ai_name}\", \"{user_name}\", \"小鬣狗\", \"老公\", \"宝贝\"）作为关键词。\n"
         f"2. 忽略高频常用词：如\"晚安故事\",\"吃什么\"等。\n"
         f"3. 聚焦核心实体：只提取稀缺的、具有区分度的名词（地点、物品、特定事件、专有名词等）\n"
         f"4. 仅当提起之前做过的事、过去的回忆时，is_search_needed才输出为true。若在询问日常问题，不涉及回忆过去，is_search_needed输出为false。\n"
         f"   \"is_search_needed\": Boolean.\n"
         f"      - false: 纯闲聊/语气词/无实质内容，只是在陈述或表达感情，并未进行对于具体事实的询问则输出false。\n"
         f"      - true: 当包含询问、回忆、或需要背景信息的对话，提起“昨天”、“之前”、“你还记得……”等。\n"
-        f"   \"keywords\": 提取 2-4 个搜索关键词（过滤掉 Aion, Ithil 等高频人名）。\n"
+        f"   \"keywords\": 提取 2-4 个搜索关键词（过滤掉 {ai_name}, {user_name} 等高频人名）。\n"
         f"   \"require_detail\": Boolean.\n"
         f"      - false: 模糊回忆/情感抒发（只需读取摘要）。\n"
         f"      - true: 当且仅当询问具体事实/细节/步骤（需要读取正文），例如：还记得我们之前…你记得上次…等。\n"
@@ -614,6 +623,7 @@ async def _do_digest(min_messages: int = 0) -> dict:
         date_header = f"[对话时间范围: {group_start} ~ {group_end}]\n"
         # 判断该组是否混合了私聊和群聊
         sources = set(m.get("_source", "private") for m in group)
+        connor_name = _connor_display_name()
         has_mixed = len(sources) > 1
         lines = []
         for m in group:
@@ -621,7 +631,7 @@ async def _do_digest(min_messages: int = 0) -> dict:
             src = m.get("_source", "private")
             sender = m.get("sender", "")
             if src == "group":
-                name = {"user": user_name, "aion": ai_name, "connor": "Connor"}.get(sender, sender)
+                name = {"user": user_name, "aion": ai_name, "connor": connor_name}.get(sender, sender)
             else:
                 name = user_name if m["role"] == "user" else ai_name
             tag = f"[{'群聊' if src == 'group' else '私聊'}]" if has_mixed else ""
@@ -637,7 +647,7 @@ async def _do_digest(min_messages: int = 0) -> dict:
             f"多个话题可以用多个短句来概括，例如：今天下午{user_name}玩了拼豆并展示给我看。今天莱利做了绝育手术。"
             f"语言简练，**严禁废话**。总体控制在100字以内。\n\n"
             f"2. \"keywords\": 提取 2-6 个用于检索的核心关键词。\n"
-            f"   - 【严禁】包含高频人名（如 Aion, Ithil, Riley, Maru等）。\n"
+            f"   - 【严禁】包含高频人名（如 {ai_name}, {user_name}, {connor_name}, Riley, Maru等）。\n"
             f"   - 【严禁】包含泛指词或无意义虚词（如 AI, 聊天, 回复, 说话, 好的, 知道）。\n"
             f"   - 将对话中提及的**稀缺**专有名词罗列出来。\n"
             f"   - 包括：书名、电影名、具体的菜名、地名、特定的技术术语等。\n\n"

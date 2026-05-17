@@ -407,6 +407,8 @@ async def annotate_segment(book_id: str, ch_idx: int, body: AnnotateRequest):
 
     # 构建 Aion prompt
     wb = load_worldbook()
+    ai_name = wb.get("ai_name", "AI")
+    connor_name = load_chatroom_config().get("connor_name", "Connor")
     model_key = body.model_key or DEFAULT_MODEL
     if model_key not in MODELS:
         model_key = DEFAULT_MODEL
@@ -444,7 +446,7 @@ async def annotate_segment(book_id: str, ch_idx: int, body: AnnotateRequest):
                     await _save_annotations(book_id, ch_idx, seg_idx, aion_result, annotator='aion')
                     yield f"data: {json.dumps({'type': 'aion_result', 'annotations': aion_result['annotations'], 'summary': aion_result['summary'], 'segment_index': seg_idx})}\n\n"
                 else:
-                    yield f"data: {json.dumps({'type': 'aion_error', 'message': 'Aion 返回格式解析失败'})}\n\n"
+                    yield f"data: {json.dumps({'type': 'aion_error', 'message': f'{ai_name} 返回格式解析失败'})}\n\n"
 
             # 等待 Connor 完成
             if connor_task:
@@ -457,7 +459,7 @@ async def annotate_segment(book_id: str, ch_idx: int, body: AnnotateRequest):
                         await _save_annotations(book_id, ch_idx, seg_idx, connor_result, annotator='connor')
                         yield f"data: {json.dumps({'type': 'connor_result', 'annotations': connor_result['annotations'], 'summary': connor_result['summary'], 'segment_index': seg_idx})}\n\n"
                     else:
-                        yield f"data: {json.dumps({'type': 'connor_error', 'message': 'Connor 返回格式解析失败'})}\n\n"
+                        yield f"data: {json.dumps({'type': 'connor_error', 'message': f'{connor_name} 返回格式解析失败'})}\n\n"
 
             # 更新 segments_meta 状态
             await _update_segment_status(book_id, ch_idx, seg_idx, 'done')
@@ -524,6 +526,8 @@ async def annotate_all_segments(book_id: str, ch_idx: int, body: AnnotateAllRequ
                 prev_summaries = await _get_prev_summaries(book_id, ch_idx, limit=3)
                 chat_context = await _get_chat_context_merged(limit=15)
 
+                ai_name = wb.get("ai_name", "AI")
+                connor_name = load_chatroom_config().get("connor_name", "Connor")
                 aion_messages = _build_annotate_messages(wb, annotate_text, chapter['title'],
                                                          prev_summaries, start_p, end_p, chat_context, book_title)
 
@@ -541,28 +545,28 @@ async def annotate_all_segments(book_id: str, ch_idx: int, body: AnnotateAllRequ
                 aion_text, aion_error = await aion_task
                 aion_result = None
                 if aion_error:
-                    logger.error(f"Aion 批注 seg={seg_idx} 失败: {aion_error}")
-                    yield f"data: {json.dumps({'type': 'segment_error', 'segment_index': seg_idx, 'message': f'Aion: {aion_error}', 'who': 'aion'})}\n\n"
+                    logger.error(f"{ai_name} 批注 seg={seg_idx} 失败: {aion_error}")
+                    yield f"data: {json.dumps({'type': 'segment_error', 'segment_index': seg_idx, 'message': f'{ai_name}: {aion_error}', 'who': 'aion'})}\n\n"
                 else:
                     aion_result = _parse_annotation_json(aion_text, start_p, end_p)
                     if aion_result:
                         await _save_annotations(book_id, ch_idx, seg_idx, aion_result, annotator='aion')
                     else:
-                        yield f"data: {json.dumps({'type': 'segment_error', 'segment_index': seg_idx, 'message': 'Aion 格式解析失败', 'who': 'aion'})}\n\n"
+                        yield f"data: {json.dumps({'type': 'segment_error', 'segment_index': seg_idx, 'message': f'{ai_name} 格式解析失败', 'who': 'aion'})}\n\n"
 
                 # Connor 结果
                 connor_result = None
                 if connor_task:
                     connor_text, connor_error = await connor_task
                     if connor_error:
-                        logger.error(f"Connor 批注 seg={seg_idx} 失败: {connor_error}")
-                        yield f"data: {json.dumps({'type': 'segment_error', 'segment_index': seg_idx, 'message': f'Connor: {connor_error}', 'who': 'connor'})}\n\n"
+                        logger.error(f"{connor_name} 批注 seg={seg_idx} 失败: {connor_error}")
+                        yield f"data: {json.dumps({'type': 'segment_error', 'segment_index': seg_idx, 'message': f'{connor_name}: {connor_error}', 'who': 'connor'})}\n\n"
                     else:
                         connor_result = _parse_annotation_json(connor_text, start_p, end_p)
                         if connor_result:
                             await _save_annotations(book_id, ch_idx, seg_idx, connor_result, annotator='connor')
                         else:
-                            yield f"data: {json.dumps({'type': 'segment_error', 'segment_index': seg_idx, 'message': 'Connor 格式解析失败', 'who': 'connor'})}\n\n"
+                            yield f"data: {json.dumps({'type': 'segment_error', 'segment_index': seg_idx, 'message': f'{connor_name} 格式解析失败', 'who': 'connor'})}\n\n"
 
                 await _update_segment_status(book_id, ch_idx, seg_idx, 'done')
 

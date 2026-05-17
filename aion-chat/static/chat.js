@@ -8,6 +8,7 @@ let _abortController = null;  // 用于中止 AI 生成
 let camCheckMsgId = null;
 let poiSearchMsgId = null;
 let poiSearchCategories = null;
+let chatroomConfig = {};
 
 // 客户端唯一 ID（持久化）— 不用 crypto.randomUUID() 因为 WebView 非安全上下文不支持
 const _clientId = localStorage.getItem('aion_client_id') || (() => {
@@ -76,6 +77,7 @@ async function init() {
   models = await api("GET", "/api/models");
   renderModelSelect();
   worldBook = await api("GET", "/api/worldbook");
+  try { chatroomConfig = await api("GET", "/api/chatroom/config"); } catch(e) { chatroomConfig = {}; }
   conversations = await api("GET", "/api/conversations");
   const lastId = localStorage.getItem('aion_last_conv');
   if (lastId && conversations.find(c => c.id === lastId)) {
@@ -3714,7 +3716,7 @@ function _presentNextGift() {
           <img class="gift-image" src="/uploads/${gift.image_path}" alt="礼物" />
         </div>
         <div class="gift-message-wrap" id="giftMessageWrap" style="display:none">
-          <p class="gift-message-from" style="text-align:center;opacity:0.7;font-size:0.85em;margin-bottom:4px">—— from ${gift.sender === 'connor' ? 'Connor' : 'Aion'} ——</p>
+          <p class="gift-message-from" style="text-align:center;opacity:0.7;font-size:0.85em;margin-bottom:4px">—— from ${gift.sender === 'connor' ? (chatroomConfig.connor_name || 'Connor') : ((worldBook && worldBook.ai_name) || 'AI')} ——</p>
           <p class="gift-message-text">${escHtml(gift.message)}</p>
         </div>
         <button class="gift-receive-btn" id="giftReceiveBtn" style="display:none" onclick="_receiveGift('${gift.id}')">💝 收下礼物</button>
