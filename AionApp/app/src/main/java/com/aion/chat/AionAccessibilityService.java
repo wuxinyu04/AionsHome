@@ -95,6 +95,9 @@ public class AionAccessibilityService extends AccessibilityService {
         super.onServiceConnected();
         serviceActive = true;
         instance = this;
+        // 标记用户曾主动开启过无障碍，用于自动恢复判断
+        getSharedPreferences("aion_prefs", MODE_PRIVATE)
+                .edit().putBoolean("accessibility_user_opted_in", true).apply();
         Log.i(TAG, "Accessibility screenshot service connected");
     }
 

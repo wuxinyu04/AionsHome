@@ -1444,6 +1444,11 @@ public class AionPushService extends Service {
         // 检查无障碍服务实例是否存活
         if (AionAccessibilityService.isReady()) return;
 
+        // 只有用户曾主动开启过无障碍服务才自动恢复，未开过的不强制
+        boolean userOptedIn = getSharedPreferences("aion_prefs", MODE_PRIVATE)
+                .getBoolean("accessibility_user_opted_in", false);
+        if (!userOptedIn) return;
+
         // 冷却期内不重复操作
         long now = System.currentTimeMillis();
         if (now - lastAccessibilityRecoverAt < ACCESSIBILITY_RECOVER_COOLDOWN) return;
