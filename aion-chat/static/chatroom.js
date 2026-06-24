@@ -2134,9 +2134,48 @@ async function jumpToChatSearchResult(msgId) {
     }
   }
   closeChatSearch();
-  row?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  await crCenterSearchResult(msgId);
+  row = messagesEl.querySelector(crMsgSelector(msgId));
   row?.classList.add('search-hit');
   setTimeout(() => row?.classList.remove('search-hit'), 1600);
+}
+
+let crSearchJumpToken = 0;
+
+async function crCenterSearchResult(msgId) {
+  const token = ++crSearchJumpToken;
+  const nextFrame = () => new Promise(resolve => requestAnimationFrame(resolve));
+  const center = () => {
+    if (token !== crSearchJumpToken) return;
+    const row = messagesEl.querySelector(crMsgSelector(msgId));
+    if (!row) return;
+    const listRect = messagesEl.getBoundingClientRect();
+    const rowRect = row.getBoundingClientRect();
+    const centeredTop = messagesEl.scrollTop
+      + rowRect.top - listRect.top
+      - (messagesEl.clientHeight - rowRect.height) / 2;
+    messagesEl.scrollTop = Math.max(0, centeredTop);
+  };
+
+  // Let the freshly rendered message window settle before the first alignment.
+  await nextFrame();
+  await nextFrame();
+  center();
+
+  const pendingImages = Array.from(messagesEl.querySelectorAll('img:not([complete])'))
+    .filter(img => !img.complete);
+  const imageLayoutSettled = Promise.all(pendingImages.map(img => new Promise(resolve => {
+    img.addEventListener('load', resolve, { once: true });
+    img.addEventListener('error', resolve, { once: true });
+  })));
+  const fontLayoutSettled = document.fonts?.ready || Promise.resolve();
+
+  await Promise.race([
+    Promise.all([imageLayoutSettled, fontLayoutSettled]),
+    new Promise(resolve => setTimeout(resolve, 700)),
+  ]);
+  await nextFrame();
+  center();
 }
 
 if (chatSearchForm) chatSearchForm.addEventListener('submit', runChatSearch);

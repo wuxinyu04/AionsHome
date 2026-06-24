@@ -4772,6 +4772,26 @@ function subPagePath(url) {
   try { return new URL(url, location.origin).pathname; } catch(e) { return url || ''; }
 }
 
+function shouldNavigatePersistentSubPage(frame, url) {
+  try {
+    const requested = new URL(url, location.origin);
+    // Plain app launches keep the preserved page state. Explicit route params
+    // (for example, a global-search message anchor) must navigate the frame.
+    if (!requested.search && !requested.hash) return false;
+    let current;
+    try {
+      current = new URL(frame.contentWindow.location.href, location.origin);
+    } catch(e) {
+      current = new URL(frame.src || 'about:blank', location.origin);
+    }
+    return current.pathname !== requested.pathname
+      || current.search !== requested.search
+      || current.hash !== requested.hash;
+  } catch(e) {
+    return false;
+  }
+}
+
 function isPersistentSubPage(url) {
   const path = subPagePath(url);
   return path === '/' || path === '/chatroom' || path === '/health';
@@ -4803,6 +4823,8 @@ function getSubPageFrame(url) {
     attachSubPageFrameLoad(frame);
     $('subPageFrames').appendChild(frame);
     persistentSubPageFrames.set(path, frame);
+    frame.src = url;
+  } else if (shouldNavigatePersistentSubPage(frame, url)) {
     frame.src = url;
   }
   return frame;
