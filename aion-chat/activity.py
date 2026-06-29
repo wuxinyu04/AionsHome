@@ -12,6 +12,20 @@ from ws import manager
 
 log = logging.getLogger("activity")
 
+# Windows 控制台默认 GBK 编码，遇到窗口标题/emoji 中的特殊字符会 UnicodeEncodeError
+# 导致采集线程整体崩溃。统一用 replace 容错打印，绝不让输出打断采集循环。
+def _safe_print(*args, **kwargs):
+    try:
+        import sys as _sys
+        _sys.stdout.buffer.write(
+            (" ".join(str(a) for a in args) + kwargs.get("end", "\n")).encode(
+                _sys.stdout.encoding or "utf-8", errors="replace"
+            )
+        )
+        _sys.stdout.buffer.flush()
+    except Exception:
+        pass
+
 # ── 文件操作锁（保护 JSONL 读写不被 PC 线程和 API 协程并发冲突）──
 _file_lock = threading.Lock()
 _last_cleanup_ts = 0.0
@@ -270,23 +284,23 @@ class PCActivityTracker:
 
     def start(self):
         import sys
-        print("[PCActivity] start() 被调用", flush=True)
+        _safe_print("[PCActivity] start() 被调用", flush=True)
         if self._thread and self._thread.is_alive():
-            print("[PCActivity] 线程已在运行，跳过", flush=True)
+            _safe_print("[PCActivity] 线程已在运行，跳过", flush=True)
             return
         try:
             import win32gui  # noqa: F401
-            print("[PCActivity] win32gui 导入成功", flush=True)
+            _safe_print("[PCActivity] win32gui 导入成功", flush=True)
         except ImportError:
-            print("[PCActivity] pywin32 未安装，PC 活动采集已禁用", flush=True)
+            _safe_print("[PCActivity] pywin32 未安装，PC 活动采集已禁用", flush=True)
             return
         except Exception as e:
-            print(f"[PCActivity] win32gui 导入失败: {e}", flush=True)
+            _safe_print(f"[PCActivity] win32gui 导入失败: {e}", flush=True)
             return
         self._running = True
         self._thread = threading.Thread(target=self._loop, daemon=True, name="PCActivity")
         self._thread.start()
-        print(f"[PCActivity] PC 活动采集已启动（间隔 {self.interval}s）", flush=True)
+        _safe_print(f"[PCActivity] PC 活动采集已启动（间隔 {self.interval}s）", flush=True)
 
     def stop(self):
         self._running = False
@@ -299,12 +313,12 @@ class PCActivityTracker:
             import win32gui
             import win32process
         except Exception as e:
-            print(f"[PCActivity] ❌ 线程内导入失败: {e}")
+            _safe_print(f"[PCActivity] ❌ 线程内导入失败: {e}")
             self._running = False
             return
         import time as _time
 
-        print(f"[PCActivity] 采集线程已进入循环 (pid={__import__('os').getpid()})", flush=True)
+        _safe_print(f"[PCActivity] 采集线程已进入循环 (pid={__import__('os').getpid()})", flush=True)
 
         while self._running:
             try:
@@ -330,7 +344,7 @@ class PCActivityTracker:
 
                     if title_changed:
                         self._last_title = title
-                        print(f"[PCActivity] {entry['time']} {app_name} - {title[:60]}", flush=True)
+                        _safe_print(f"[PCActivity] {entry['time']} {app_name} - {title[:60]}", flush=True)
 
                     # 清理过期日志
                     try:
@@ -350,10 +364,10 @@ class PCActivityTracker:
                                 self._event_loop
                             )
                         except Exception as be:
-                            print(f"[PCActivity] ⚠ 广播失败: {be}")
+                            _safe_print(f"[PCActivity] ⚠ 广播失败: {be}")
 
             except Exception as e:
-                print(f"[PCActivity] ❌ 错误: {e}")
+                _safe_print(f"[PCActivity] ❌ 错误: {e}")
                 import traceback
                 traceback.print_exc()
 
@@ -363,7 +377,7 @@ class PCActivityTracker:
                     break
                 _time.sleep(1)
 
-        print("[PCActivity] 线程退出")
+        _safe_print("[PCActivity] 线程退出")
 
     @staticmethod
     def _get_process_name(hwnd, win32process) -> str:
@@ -408,12 +422,12 @@ class PCDisplayTracker:
             return
         import os
         if os.name != "nt":
-            print("[PCDisplay] 非 Windows 环境，显示器状态采集已禁用", flush=True)
+            _safe_print("[PCDisplay] 非 Windows 环境，显示器状态采集已禁用", flush=True)
             return
         self._running = True
         self._thread = threading.Thread(target=self._loop, daemon=True, name="PCDisplay")
         self._thread.start()
-        print("[PCDisplay] 显示器状态采集已启动", flush=True)
+        _safe_print("[PCDisplay] 显示器状态采集已启动", flush=True)
 
     def stop(self):
         self._running = False
@@ -468,7 +482,7 @@ class PCDisplayTracker:
         try:
             state = self._probe_physical_monitor_power_state()
         except Exception as e:
-            print(f"[PCDisplay] 物理显示器探测失败: {e}", flush=True)
+            _safe_print(f"[PCDisplay] 物理显示器探测失败: {e}", flush=True)
             state = "unknown"
 
         if state == "on":
@@ -624,7 +638,7 @@ class PCDisplayTracker:
             import win32gui
             from ctypes import wintypes
         except Exception as e:
-            print(f"[PCDisplay] 初始化失败: {e}", flush=True)
+            _safe_print(f"[PCDisplay] 初始化失败: {e}", flush=True)
             self._running = False
             return
 
@@ -657,9 +671,9 @@ class PCDisplayTracker:
                     if state != self._state:
                         self._state = state
                         self._last_change_ts = time.time()
-                        print(f"[PCDisplay] display_state={state}", flush=True)
+                        _safe_print(f"[PCDisplay] display_state={state}", flush=True)
                 except Exception as e:
-                    print(f"[PCDisplay] 状态解析失败: {e}", flush=True)
+                    _safe_print(f"[PCDisplay] 状态解析失败: {e}", flush=True)
             return win32gui.DefWindowProc(hwnd, msg, wparam, lparam)
 
         try:
@@ -694,12 +708,12 @@ class PCDisplayTracker:
                 DEVICE_NOTIFY_WINDOW_HANDLE,
             )
             if not self._notify_handle:
-                print("[PCDisplay] RegisterPowerSettingNotification 失败，启用空闲时间兜底", flush=True)
+                _safe_print("[PCDisplay] RegisterPowerSettingNotification 失败，启用空闲时间兜底", flush=True)
             while self._running:
                 win32gui.PumpWaitingMessages()
                 _time.sleep(0.25)
         except Exception as e:
-            print(f"[PCDisplay] 监听线程异常: {e}", flush=True)
+            _safe_print(f"[PCDisplay] 监听线程异常: {e}", flush=True)
         finally:
             try:
                 if self._notify_handle:
@@ -714,7 +728,7 @@ class PCDisplayTracker:
             self._hwnd = None
             self._notify_handle = None
             self._running = False
-            print("[PCDisplay] 线程退出", flush=True)
+            _safe_print("[PCDisplay] 线程退出", flush=True)
 
 
 # ── 10 分钟活动摘要 ──────────────────────────────────

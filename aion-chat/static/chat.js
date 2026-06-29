@@ -2488,7 +2488,12 @@ function _getMaxTokens() {
 async function send() {
   const input = $("input");
   const text = input.value.trim();
-  if ((!text && !pendingAttachments.length) || !currentConvId || sending) return;
+  if ((!text && !pendingAttachments.length) || sending) return;
+  // 未选中任何对话时自动新建一个，避免“点发送没反应”
+  if (!currentConvId) {
+    await newConversation();
+    if (!currentConvId) return;  // 新建失败则放弃
+  }
 
   sending = true;
   _showStopBtn();

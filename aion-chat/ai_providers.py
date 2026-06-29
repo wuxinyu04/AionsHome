@@ -550,7 +550,9 @@ def _openai_chat_completions_url(base_url: str) -> str:
         return ""
     if base.endswith("/chat/completions"):
         return base
-    if base.endswith("/v1"):
+    # 末段是版本号（如 /v1 /v2 /v3，含火山 /api/v3、/api/coding/v3）→ 仅补 /chat/completions
+    import re
+    if re.search(r"/v\d+$", base):
         return f"{base}/chat/completions"
     return f"{base}/v1/chat/completions"
 
