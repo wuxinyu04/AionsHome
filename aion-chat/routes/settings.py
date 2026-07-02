@@ -11,7 +11,7 @@ from typing import Any, Dict, Optional
 
 import httpx
 
-from config import SETTINGS, save_settings, get_key, get_sentinel_config, load_worldbook, save_worldbook, load_chat_status, TTS_CACHE_DIR, TTS_CACHE_MAX_BYTES, THEATER_TTS_CACHE_DIR, normalize_custom_model_routes, refresh_custom_models, iter_visible_models
+from config import SETTINGS, save_settings, get_key, get_sentinel_config, load_worldbook, save_worldbook, load_chat_status, TTS_CACHE_DIR, TTS_CACHE_MAX_BYTES, THEATER_TTS_CACHE_DIR, normalize_custom_model_routes, normalize_antigravity_models, refresh_custom_models, iter_visible_models
 from tts import cleanup_tts_cache_dir
 from ws import manager
 
@@ -52,6 +52,7 @@ class SettingsUpdate(BaseModel):
     luckin_default_latitude: Optional[str] = None
     luckin_default_shop_keyword: Optional[str] = None
     custom_model_routes: Optional[list[Dict[str, Any]]] = None
+    antigravity_models: Optional[list[Dict[str, Any]]] = None
 
 class HomeLayoutUpdate(BaseModel):
     version: Optional[int] = 2
@@ -108,6 +109,7 @@ async def get_settings():
         "luckin_default_latitude": SETTINGS.get("luckin_default_latitude", ""),
         "luckin_default_shop_keyword": SETTINGS.get("luckin_default_shop_keyword", ""),
         "custom_model_routes": normalize_custom_model_routes(SETTINGS.get("custom_model_routes")),
+        "antigravity_models": normalize_antigravity_models(SETTINGS.get("antigravity_models")),
         "gemini_key_masked": mask(SETTINGS.get("gemini_key", "")),
         "siliconflow_key_masked": mask(SETTINGS.get("siliconflow_key", "")),
         "gemini_free_key_masked": mask(SETTINGS.get("gemini_free_key", "")),
@@ -154,6 +156,9 @@ async def update_settings(body: SettingsUpdate):
         SETTINGS["luckin_default_shop_keyword"] = body.luckin_default_shop_keyword
     if body.custom_model_routes is not None:
         SETTINGS["custom_model_routes"] = normalize_custom_model_routes(body.custom_model_routes)
+        refresh_custom_models()
+    if body.antigravity_models is not None:
+        SETTINGS["antigravity_models"] = normalize_antigravity_models(body.antigravity_models)
         refresh_custom_models()
     if body.netease_music_u is not None:
         old_mu = SETTINGS.get("netease_music_u", "")

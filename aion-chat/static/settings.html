@@ -472,6 +472,17 @@ body[data-theme="light"] .ghost-btn {
           <label class="form-label">硅基流动 API Key</label>
           <input class="form-input mono-input" type="text" id="sfKeyInput" placeholder="输入硅基流动 API Key..." autocomplete="off">
         </div>
+        <div class="field">
+          <label class="form-label">TTS 语音合成服务商</label>
+          <select class="form-input" id="ttsProviderSelect">
+            <option value="siliconflow">硅基流动（CosyVoice2，0.5元/万字符）</option>
+            <option value="senseaudio">SenseAudio（senseaudio-tts-1.5，3.5元/万字符）</option>
+          </select>
+        </div>
+        <div class="field">
+          <label class="form-label">SenseAudio API Key（选 SenseAudio 时必填）</label>
+          <input class="form-input mono-input" type="text" id="senseaudioKeyInput" placeholder="senseaudio.cn → API 密钥 获取" autocomplete="off">
+        </div>
         <div class="field full">
           <label class="form-label">网易云 MUSIC_U Cookie（VIP 点歌）</label>
           <input class="form-input mono-input" type="text" id="neteaseMusicUInput" placeholder="浏览器 F12 → Cookie → MUSIC_U" autocomplete="off">
@@ -492,6 +503,23 @@ body[data-theme="light"] .ghost-btn {
         <div id="customRoutesList" class="route-list"></div>
         <div class="section-actions">
           <button class="action-btn add" type="button" onclick="addCustomRoute()">＋ 添加线路</button>
+        </div>
+      </div>
+    </details>
+
+    <details class="settings-card" open>
+      <summary>
+        <div class="summary-title">
+          <strong>🛰 Antigravity (agy) 模型</strong>
+          <span>添加本地 agy 会话可用的模型，显示名会进入模型下拉</span>
+        </div>
+        <span class="summary-chevron">›</span>
+      </summary>
+      <div class="card-body">
+        <p class="hint">走本地 agy OAuth，无需 Base URL / API Key。模型 ID 要用 agy 的显示名格式，例如 <code>Gemini 3.5 Flash</code>、<code>Gemini 3.1 Pro (High)</code>、<code>Claude Opus 4.6 (Thinking)</code>（在 PowerShell 跑 <code>agy</code> 进 <code>/model</code> 可看到完整列表）。内置 <code>AGY-3.1pro</code> 使用 agy 保存的默认模型，无需在此配置。</p>
+        <div id="antigravityModelsList" class="route-list"></div>
+        <div class="section-actions">
+          <button class="action-btn add" type="button" onclick="addAntigravityModel()">＋ 添加模型</button>
         </div>
       </div>
     </details>
@@ -838,6 +866,83 @@ function collectCustomRoutes() {
   return routes;
 }
 
+// ── Antigravity (agy) 模型：扁平列表，走本地 agy OAuth，只有显示名 + 模型 ID + 可看图 ──
+var antigravityModels = [];
+
+function newAntigravityModel() {
+  return { key: "", model: "", vision: true };
+}
+
+function normalizeAntigravityModelsForUi(list) {
+  if (!Array.isArray(list)) return [];
+  var items = list.map(function(m) {
+    return {
+      key: m.key || m.name || "",
+      model: m.model || m.model_id || "",
+      vision: m.vision !== false
+    };
+  });
+  return items.length ? items : [newAntigravityModel()];
+}
+
+function renderAntigravityModels() {
+  var list = $("antigravityModelsList");
+  if (!list) return;
+  if (!antigravityModels.length) {
+    list.innerHTML = '<div class="empty-route">还没有添加 Antigravity 模型。点“添加模型”把 agy 模型 ID 加进来。</div>';
+    return;
+  }
+  list.innerHTML = antigravityModels.map(function(m, i) {
+    return '' +
+      '<div class="model-card">' +
+        '<div class="model-card-head">' +
+          '<span class="model-index">模型 ' + (i + 1) + '</span>' +
+          '<div class="model-card-actions">' +
+            '<label class="vision-toggle">' +
+              '<input type="checkbox" ' + (m.vision !== false ? "checked" : "") + ' onchange="updateAntigravityModel(' + i + ', \'vision\', this.checked)">可看图' +
+            '</label>' +
+            '<button class="ghost-btn danger-btn model-delete" type="button" title="删除模型" onclick="removeAntigravityModel(' + i + ')">×</button>' +
+          '</div>' +
+        '</div>' +
+        '<div class="model-card-fields">' +
+          '<input class="form-input" type="text" value="' + escAttr(m.key) + '" placeholder="显示名，例如 AGY-flash" oninput="updateAntigravityModel(' + i + ', \'key\', this.value)">' +
+          '<input class="form-input mono-input" type="text" value="' + escAttr(m.model) + '" placeholder="agy 模型 ID，例如 Gemini 3.5 Flash" oninput="updateAntigravityModel(' + i + ', \'model\', this.value)">' +
+        '</div>' +
+      '</div>';
+  }).join("");
+}
+
+function updateAntigravityModel(i, field, value) {
+  if (!antigravityModels[i]) return;
+  antigravityModels[i][field] = value;
+}
+
+function addAntigravityModel() {
+  antigravityModels.push(newAntigravityModel());
+  renderAntigravityModels();
+}
+
+function removeAntigravityModel(i) {
+  antigravityModels.splice(i, 1);
+  if (!antigravityModels.length) antigravityModels.push(newAntigravityModel());
+  renderAntigravityModels();
+}
+
+function collectAntigravityModels() {
+  var out = [];
+  var seen = new Set();
+  antigravityModels.forEach(function(m, i) {
+    var key = (m.key || "").trim();
+    var modelId = (m.model || "").trim();
+    if (!key && !modelId) return; // 空行忽略
+    if (!key || !modelId) throw new Error("第 " + (i + 1) + " 个 Antigravity 模型需要同时填写显示名和模型 ID");
+    if (seen.has(key)) throw new Error("Antigravity 模型显示名重复：" + key);
+    seen.add(key);
+    out.push({ key: key, model: modelId, vision: m.vision !== false });
+  });
+  return out;
+}
+
 (async function init() {
   var s = await api("GET", "/api/settings");
   $("geminiKeyInput").value = s.gemini_key || "";
@@ -849,6 +954,8 @@ function collectCustomRoutes() {
   $("embeddingApiKeyInput").value = s.embedding_api_key || "";
   $("embeddingModelInput").value = s.embedding_model || "";
   $("sfKeyInput").value = s.siliconflow_key || "";
+  $("ttsProviderSelect").value = s.tts_provider || "siliconflow";
+  $("senseaudioKeyInput").value = s.senseaudio_key || "";
   $("neteaseMusicUInput").value = s.netease_music_u || "";
   $("luckinMcpEnabledInput").checked = !!s.luckin_mcp_enabled;
   $("luckinMcpTokenInput").value = s.luckin_mcp_token || "";
@@ -857,6 +964,8 @@ function collectCustomRoutes() {
   $("luckinShopKeywordInput").value = s.luckin_default_shop_keyword || "";
   customModelRoutes = normalizeRoutesForUi(s.custom_model_routes || []);
   renderCustomRoutes();
+  antigravityModels = normalizeAntigravityModelsForUi(s.antigravity_models || []);
+  renderAntigravityModels();
   refreshPhoneScreenStatus();
   refreshMediaCacheStatus();
 })();
@@ -867,6 +976,13 @@ async function saveSettings() {
     customRoutes = collectCustomRoutes();
   } catch (err) {
     showToast(err.message || "自定义模型线路填写不完整");
+    return;
+  }
+  var antigravityItems = [];
+  try {
+    antigravityItems = collectAntigravityModels();
+  } catch (err) {
+    showToast(err.message || "Antigravity 模型填写不完整");
     return;
   }
   var collapsedState = currentRouteCollapsedState();
@@ -880,16 +996,21 @@ async function saveSettings() {
     embedding_api_key: $("embeddingApiKeyInput").value.trim(),
     embedding_model: $("embeddingModelInput").value.trim(),
     siliconflow_key: $("sfKeyInput").value.trim(),
+    tts_provider: $("ttsProviderSelect").value,
+    senseaudio_key: $("senseaudioKeyInput").value.trim(),
     netease_music_u: $("neteaseMusicUInput").value.trim(),
     luckin_mcp_enabled: $("luckinMcpEnabledInput").checked,
     luckin_mcp_token: $("luckinMcpTokenInput").value.trim(),
     luckin_default_longitude: $("luckinLongitudeInput").value.trim(),
     luckin_default_latitude: $("luckinLatitudeInput").value.trim(),
     luckin_default_shop_keyword: $("luckinShopKeywordInput").value.trim(),
-    custom_model_routes: customRoutes
+    custom_model_routes: customRoutes,
+    antigravity_models: antigravityItems
   });
   customModelRoutes = normalizeRoutesForUi(customRoutes, collapsedState);
   renderCustomRoutes();
+  antigravityModels = normalizeAntigravityModelsForUi(antigravityItems);
+  renderAntigravityModels();
   showToast("✅ 已保存，模型列表刷新后可选择新模型");
 }
 

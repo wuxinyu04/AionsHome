@@ -1301,18 +1301,38 @@ def _strip_antigravity_wire_noise(text: str) -> str:
 
 
 def _extract_antigravity_bot_text(payload: bytes) -> str:
-    """Extract a bot response before its protobuf Z terminator and binary tail."""
-    raw = payload.decode("utf-8", errors="ignore")
-    match = re.search(
-        r"bot-[0-9a-f-]{36}B[\x00-\x08\x0b\x0c\x0e-\x1f]*"
-        r"(.+?)Z(?=[\x00-\x08\x0b\x0c\x0e-\x1f])",
-        raw,
-        re.DOTALL | re.IGNORECASE,
-    )
-    if not match:
-        return ""
-    candidate = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]+", "", match.group(1))
-    return candidate.strip()
+    """Extract the bot response from an agy type-15 step payload.
+
+    agy stores the visible reply as a length-delimited field shaped like
+    ``bot-<uuid>B<varint length><UTF-8 text><protobuf terminator>`` (the byte
+    right after ``B`` is a varint encoding the *byte length* of the text).
+    Decoding that varint lets us take exactly the text bytes, so neither the
+    leading varint prefix (e.g. ``M``/``!``/``;``) nor the binary protobuf
+    tail (`` `\\x02r...``) leaks into the chat / TTS / memory.
+
+    A previous version guessed the terminator as ``Z`` followed by a control
+    byte; agy 1.0.8 changed the terminator, that regex stopped matching, and
+    the code fell through to dumping the whole protobuf frame (binary garbage
+    after the real answer, which also tripped the auth-prompt false positive).
+    """
+    best = ""
+    for match in re.finditer(rb"bot-[0-9a-f-]{36}B", payload):
+        offset = match.end()
+        try:
+            length, offset = _read_protobuf_varint(payload, offset)
+        except ValueError:
+            continue
+        if length <= 0 or offset + length > len(payload):
+            continue
+        candidate = payload[offset:offset + length].decode("utf-8", errors="replace")
+        # Reject frames that decoded into binary noise rather than real text.
+        if not candidate.strip() or not all(
+            ch.isprintable() or ch in "\r\n\t" for ch in candidate
+        ):
+            continue
+        if len(candidate) > len(best):
+            best = candidate
+    return best.strip()
 
 
 def _extract_antigravity_sqlite_output(log_path: Path | None, *, prefer_bot: bool = False) -> str:
@@ -1353,6 +1373,15 @@ def _extract_antigravity_sqlite_output(log_path: Path | None, *, prefer_bot: boo
         raw = payload.decode("utf-8", errors="ignore")
         printable = re.sub(r"[^\x09\x0a\x0d\x20-\x7e\u4e00-\u9fff\uff00-\uffef]+", " ", raw)
         if not printable.strip():
+            continue
+
+        # For type-15 bot frames, the varint-length extraction is reliable: an
+        # empty result means this step is an intermediate tool/thought frame
+        # with no visible reply (agy often emits several before the final
+        # answer). Skip it and try the next step rather than falling through to
+        # the raw printable payload, which is binary protobuf garbage that can
+        # contain byte sequences falsely tripping the auth-prompt detector.
+        if step_type == 15 and not structured_text:
             continue
 
         # Finalization frames expose the response as a protobuf string field.
@@ -1458,10 +1487,9 @@ async def call_antigravity_cli(messages: list, model: str, meta: dict | None = N
         if SETTINGS.get("gemini_cli_tools_enabled", False):
             agy_args.append("--dangerously-skip-permissions")
         agy_args.extend(["--log-file", log_file])
-        pass_model = os.environ.get("AION_AGY_PASS_MODEL", "").strip().lower() in {"1", "true", "yes", "on"}
-        if isinstance(meta, dict) and meta.get("antigravity_pass_model"):
-            pass_model = True
-        if model and pass_model:
+        # 内置 AGY-3.1pro 的 model 为空 → 不传 --model，沿用 agy 保存的默认模型；
+        # 用户在设置页配置的 antigravity 模型有真实 id → 传 --model <id> 指定本次模型。
+        if model:
             agy_args.extend(["--model", model])
         agy_args.append("--print")
         # prompt 通过 base64 解码注入，避免 PS 转义问题

@@ -69,7 +69,14 @@ def get_key(provider: str) -> str:
         return SETTINGS.get("gemini_free_key", "") or SETTINGS.get("gemini_key", "")
     if provider == "aipro":
         return SETTINGS.get("aipro_key", "")
+    if provider == "senseaudio":
+        return SETTINGS.get("senseaudio_key", "")
     return SETTINGS.get("siliconflow_key", "")
+
+
+def get_tts_provider() -> str:
+    """返回当前 TTS 服务商：siliconflow（默认）或 senseaudio。"""
+    return (SETTINGS.get("tts_provider", "") or "siliconflow").strip()
 
 def get_sentinel_config() -> dict:
     """
@@ -197,8 +204,11 @@ def sanitize_filename(name):
 
 # ── 模型配置 ─────────────────────────────────────
 CUSTOM_OPENAI_PROVIDER = "custom_openai"
-DEPRECATED_MODEL_PROVIDERS = {"gemini_cli", "antigravity_cli"}
-DEPRECATED_MODEL_KEYS = {"CLI-3.1pro", "AGY-3.1pro"}
+# gemini_cli 已停用：Google 关闭了 Gemini CLI 的个人免费/Pro/Ultra 通路，
+# 项目里的 _extract_gemini_cli_report_error 也会把用户引导到 Antigravity (agy) 线路。
+# antigravity_cli 走 agy 本地 OAuth，仍可用，保留在模型列表里。
+DEPRECATED_MODEL_PROVIDERS = {"gemini_cli"}
+DEPRECATED_MODEL_KEYS = {"CLI-3.1pro"}
 
 BUILTIN_MODELS = {
     "硅基GLM-5.2":      {"provider": "siliconflow", "model": "zai-org/GLM-5.2", "vision": False},
@@ -211,6 +221,9 @@ BUILTIN_MODELS = {
     # model that works after account switches..
     "Codex":            {"provider": "codex_cli",  "model": "gpt-5.5", "vision": True},
     "CLI-3.1pro":       {"provider": "gemini_cli", "model": "gemini-3.1-pro-preview", "vision": True},
+    # Antigravity 走本地 agy OAuth 会话，复用 agy 自己保存的默认模型
+    # （在 agy 里用 /model 选好默认模型后，所有 agy --print 调用都会自动复用，无需传 --model）。
+    "AGY-3.1pro":       {"provider": "antigravity_cli", "model": "", "vision": True},
 }
 
 
@@ -272,6 +285,34 @@ def normalize_custom_model_routes(value) -> list[dict]:
     return routes
 
 
+def normalize_antigravity_models(value) -> list[dict]:
+    """把设置页保存的 Antigravity(agy) 模型列表清洗成稳定结构。
+
+    agy 走本地 OAuth，无需 Base URL / API Key，每条只有显示名 + agy 模型 ID + 可看图。
+    返回 [{"key","model","vision"}]，去除空值、与内置模型重名、自身重复的条目。
+    """
+    if not isinstance(value, list):
+        return []
+    models: list[dict] = []
+    seen_keys: set[str] = set()
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        model_id = _clean_text(item.get("model") or item.get("model_id"))
+        model_key = _clean_text(item.get("key") or item.get("name"))
+        if not model_id or not model_key:
+            continue
+        if model_key in BUILTIN_MODELS or model_key in seen_keys:
+            continue
+        seen_keys.add(model_key)
+        models.append({
+            "key": model_key,
+            "model": model_id,
+            "vision": bool(item.get("vision", True)),
+        })
+    return models
+
+
 def refresh_custom_models() -> None:
     """根据 settings.json 里的自定义线路刷新运行时模型列表。"""
     MODELS.clear()
@@ -288,6 +329,17 @@ def refresh_custom_models() -> None:
                 "route_id": route["id"],
                 "route_name": route["name"],
             }
+    # Antigravity(agy) 模型：扁平列表，走本地 OAuth。
+    # 若显示名与内置/自定义线路重名则跳过，避免覆盖既有 provider。
+    for item in normalize_antigravity_models(SETTINGS.get("antigravity_models")):
+        key = item["key"]
+        if key in MODELS:
+            continue
+        MODELS[key] = {
+            "provider": "antigravity_cli",
+            "model": item["model"],
+            "vision": bool(item.get("vision", True)),
+        }
 
 
 MODELS = {}

@@ -23,7 +23,8 @@ async def fake_gemini_cli(*args, **kwargs):
 
 
 class DeprecatedCliModelTests(unittest.IsolatedAsyncioTestCase):
-    async def test_model_list_hides_gemini_and_antigravity_cli_routes(self):
+    async def test_model_list_shows_antigravity_but_hides_gemini_cli(self):
+        # gemini_cli 线路被 Google 关闭已停用；antigravity_cli (agy) 重新启用，应可见。
         with patch.dict(
             config.MODELS,
             {
@@ -40,11 +41,11 @@ class DeprecatedCliModelTests(unittest.IsolatedAsyncioTestCase):
         providers = {row["provider"] for row in rows}
         keys = {row["key"] for row in rows}
         self.assertNotIn("gemini_cli", providers)
-        self.assertNotIn("antigravity_cli", providers)
+        self.assertIn("antigravity_cli", providers)
         self.assertNotIn("CLI-3.1pro", keys)
-        self.assertNotIn("AGY-3.1pro", keys)
+        self.assertIn("AGY-3.1pro", keys)
 
-    async def test_date_theater_model_rows_hide_deprecated_cli_routes(self):
+    async def test_date_theater_model_rows_show_antigravity_but_hide_gemini_cli(self):
         with patch.dict(
             date_theater_routes.MODELS,
             {
@@ -61,9 +62,9 @@ class DeprecatedCliModelTests(unittest.IsolatedAsyncioTestCase):
         providers = {row["provider"] for row in rows}
         keys = {row["key"] for row in rows}
         self.assertNotIn("gemini_cli", providers)
-        self.assertNotIn("antigravity_cli", providers)
+        self.assertIn("antigravity_cli", providers)
         self.assertNotIn("CLI-3.1pro", keys)
-        self.assertNotIn("AGY-3.1pro", keys)
+        self.assertIn("AGY-3.1pro", keys)
 
     async def test_date_theater_resolves_deprecated_locked_model_to_visible_model(self):
         with patch.dict(
