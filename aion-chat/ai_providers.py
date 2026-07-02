@@ -10,6 +10,41 @@ import tempfile
 
 from config import get_key, MODELS, UPLOADS_DIR, CODEX_UPLOADS_DIR, SETTINGS, get_sentinel_config, DATA_DIR, resolve_model_key, is_model_deprecated
 
+# ── 网络代理策略 ───────────────────────────────────
+# 国内域名/IP 直连，绕过系统代理环境变量（HTTP_PROXY/HTTPS_PROXY）；
+# 否则保持 httpx 默认的 trust_env=True，让请求继续走代理（用于 Gemini 等国外服务）。
+# 这样火山引擎(ark.*.volces.com)、硅基流动等国内服务不再依赖梯子是否开启。
+_DOMESTIC_PROXY_SUFFIXES = (
+    ".cn", ".com.cn",
+    "volces.com",          # 火山引擎方舟
+    "siliconflow.cn",     # 硅基流动
+    "aliyuncs.com",       # 阿里云百炼
+    "tencentcloudapi.com",# 腾讯云
+    "baidubce.com",       # 千帆
+    "senseaudio.com",     # SenseAudio
+    "senseaudio.cn",      # SenseAudio（.cn）
+)
+_DOMESTIC_PROXY_HOSTS = {"127.0.0.1", "localhost"}
+
+
+def _is_domestic_url(url: str) -> bool:
+    """判断 URL 是否属于国内域名，应直连不走代理。"""
+    try:
+        host = httpx.URL(url).host
+    except Exception:
+        return False
+    if not host:
+        return False
+    if host in _DOMESTIC_PROXY_HOSTS:
+        return True
+    return any(host == s or host.endswith(s) for s in _DOMESTIC_PROXY_SUFFIXES)
+
+
+def _make_http_client(url: str, *, timeout: int = 120) -> httpx.AsyncClient:
+    """根据目标 URL 选择代理策略：国内直连，国外走环境变量代理。"""
+    return httpx.AsyncClient(timeout=timeout, trust_env=not _is_domestic_url(url))
+
+
 # CLI 状态前缀：yield 此前缀的 chunk 会被 _bg_generate 拦截为状态事件，不送入 TTS 和正文
 CLI_STATUS_PREFIX = "\x00CLI_STATUS:"
 _ANTIGRAVITY_DEFAULT_PRINT_TIMEOUT = "10m"
@@ -415,7 +450,7 @@ async def call_siliconflow(messages: list, model: str, meta: dict | None = None,
         payload["temperature"] = temperature
     if max_tokens is not None:
         payload["max_tokens"] = max_tokens
-    async with httpx.AsyncClient(timeout=120) as client:
+    async with _make_http_client(url) as client:
         async with client.stream("POST", url, json=payload, headers=headers) as resp:
             if resp.status_code != 200:
                 body = await resp.aread()
@@ -468,7 +503,7 @@ async def call_gemini(messages: list, model: str, meta: dict | None = None, temp
         gen_config["maxOutputTokens"] = max_tokens
     if gen_config:
         payload["generationConfig"] = gen_config
-    async with httpx.AsyncClient(timeout=120) as client:
+    async with _make_http_client(url) as client:
         async with client.stream("POST", url, json=payload) as resp:
             if resp.status_code != 200:
                 body = await resp.aread()
@@ -511,7 +546,7 @@ async def call_aipro(messages: list, model: str, meta: dict | None = None, tempe
         payload["temperature"] = temperature
     if max_tokens is not None:
         payload["max_tokens"] = max_tokens
-    async with httpx.AsyncClient(timeout=120) as client:
+    async with _make_http_client(url) as client:
         async with client.stream("POST", url, json=payload, headers=headers) as resp:
             if resp.status_code != 200:
                 body = await resp.aread()
@@ -574,7 +609,7 @@ async def call_custom_openai(messages: list, cfg: dict, meta: dict | None = None
         payload["temperature"] = temperature
     if max_tokens is not None:
         payload["max_tokens"] = max_tokens
-    async with httpx.AsyncClient(timeout=120) as client:
+    async with _make_http_client(url) as client:
         async with client.stream("POST", url, json=payload, headers=headers) as resp:
             if resp.status_code != 200:
                 body = await resp.aread()
