@@ -101,6 +101,8 @@ async function init() {
   // 恢复温度设置
   const savedTemp = localStorage.getItem('aion_temperature');
   if (savedTemp) { $("tempSlider").value = savedTemp; $("tempValue").textContent = savedTemp; }
+  // 加载即把滑块值同步给后端，避免「滑块显示 X、后端实际跑 Y」脱节（曾因 settings.json 被改成 2.0 而滑块显示 1，导致高温乱码）
+  syncTemperature();
   // 恢复最大回复长度设置
   const savedMaxTokens = localStorage.getItem('aion_max_tokens');
   if (savedMaxTokens) { $("maxTokensSlider").value = savedMaxTokens; const v = parseInt(savedMaxTokens); $("maxTokensValue").textContent = v === 0 ? '不限' : v; }
