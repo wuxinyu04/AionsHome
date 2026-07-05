@@ -200,6 +200,11 @@ function connectCommonWS(extraHandler) {
       showAlarmPopup(msg.data);
       return;
     }
+    // 头像更换 — 全局刷新所有页面已加载的头像 img
+    if (msg.type === "avatar_changed") {
+      _refreshAvatarVersion(msg.data && msg.data.kind, msg.data && msg.data.version);
+      return;
+    }
     // 监控提示音 — 全局
     if (msg.type === "monitor_alert") {
       const audio = new Audio('/public/AionMonitoralart.mp3');
@@ -448,3 +453,97 @@ async function _receiveGift(giftId) {
     _presentNextGift();
   }, 800);
 }
+
+/* ── 头像版本管理 ── */
+// 多个页面前端写死引用 /public/UserIcon.png（用户）和 /public/AIIcon.png（AI），
+// 覆盖文件后浏览器会沿用缓存里的旧图。这里给 URL 带上版本号（文件 mtime），
+// WS 收到 avatar_changed 时更新版本号并刷新当前文档所有头像 img；
+// 启动时从后端拉一次版本号，给静态和动态插入的头像都补上版本号。
+const _AVATAR_FILES = { user: 'UserIcon.png', ai: 'AIIcon.png' };
+let _avatarVersions = (function () {
+  try { return JSON.parse(localStorage.getItem('aion_avatar_versions') || '{}') || {}; }
+  catch (e) { return {}; }
+})();
+
+window.avatarUrl = function (kind) {
+  const file = _AVATAR_FILES[kind];
+  if (!file) return `/public/${kind}.png`;
+  const v = _avatarVersions[kind];
+  return `/public/${file}` + (v ? `?v=${v}` : '');
+};
+
+function _avatarKeyFromSrc(src) {
+  if (!src) return null;
+  for (const k in _AVATAR_FILES) {
+    if (src.indexOf(_AVATAR_FILES[k]) !== -1) return k;
+  }
+  return null;
+}
+
+function applyAvatars() {
+  const imgs = document.querySelectorAll('img');
+  for (let i = 0; i < imgs.length; i++) {
+    const img = imgs[i];
+    const key = _avatarKeyFromSrc(img.getAttribute('src') || '');
+    if (!key) continue;
+    const want = window.avatarUrl(key);
+    if (img.getAttribute('src') !== want) img.src = want;
+  }
+}
+
+function _refreshAvatarVersion(kind, version) {
+  if (!_AVATAR_FILES[kind]) return;
+  _avatarVersions[kind] = version;
+  try { localStorage.setItem('aion_avatar_versions', JSON.stringify(_avatarVersions)); } catch (e) {}
+  applyAvatars();
+}
+
+async function _initAvatarVersions() {
+  try {
+    const res = await fetch('/api/avatar');
+    const data = await res.json();
+    const avatars = (data && data.avatars) || {};
+    for (const k in _AVATAR_FILES) {
+      if (avatars[k] && avatars[k].version) _avatarVersions[k] = avatars[k].version;
+    }
+    try { localStorage.setItem('aion_avatar_versions', JSON.stringify(_avatarVersions)); } catch (e) {}
+    applyAvatars();
+  } catch (e) {}
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', _initAvatarVersions, { once: true });
+} else {
+  _initAvatarVersions();
+}
+
+// 兜底：JS 动态插入的头像 img 也补上版本号，这样 moments/reading/theater
+// 等不改代码的页面换头像后也能看到新图。
+const _avatarObserver = new MutationObserver(function (mutations) {
+  for (let i = 0; i < mutations.length; i++) {
+    const added = mutations[i].addedNodes;
+    for (let j = 0; j < added.length; j++) {
+      const node = added[j];
+      if (node.nodeType !== 1) continue;
+      const imgs = node.tagName === 'IMG' ? [node] : (node.querySelectorAll ? node.querySelectorAll('img') : []);
+      for (let k = 0; k < imgs.length; k++) {
+        const img = imgs[k];
+        const key = _avatarKeyFromSrc(img.getAttribute('src') || '');
+        if (key && img.getAttribute('src') !== window.avatarUrl(key)) {
+          img.src = window.avatarUrl(key);
+        }
+      }
+    }
+  }
+});
+
+function _startAvatarObserver() {
+  if (document.body) {
+    _avatarObserver.observe(document.body, { childList: true, subtree: true });
+  } else {
+    document.addEventListener('DOMContentLoaded', function () {
+      _avatarObserver.observe(document.body, { childList: true, subtree: true });
+    }, { once: true });
+  }
+}
+_startAvatarObserver();

@@ -59,6 +59,7 @@ from routes import persona_evolution as persona_evolution_routes
 from routes import wishes as wishes_routes
 from routes import xhs_lite as xhs_lite_routes
 from routes import capabilities as capabilities_routes
+from routes import avatar as avatar_routes
 from activity import pc_tracker, pc_display_tracker
 from memory import auto_digest
 from chatroom import _connor_1v1_auto_digest_loop
@@ -232,6 +233,7 @@ app.include_router(persona_evolution_routes.router)
 app.include_router(wishes_routes.router)
 app.include_router(xhs_lite_routes.router)
 app.include_router(capabilities_routes.router)
+app.include_router(avatar_routes.router)
 
 
 @app.get("/api/client-assets")

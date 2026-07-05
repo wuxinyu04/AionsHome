@@ -1292,9 +1292,58 @@ function connectWS() {
   ws.onclose = () => setTimeout(connectWS, 2000);
 }
 
+// ── 头像版本管理（聊天页不引入 common.js，自带一份；与 common.js 共享 localStorage）──
+const _CHAT_AVATAR_FILES = { user: 'UserIcon.png', ai: 'AIIcon.png' };
+let _chatAvatarVersions = (() => {
+  try { return JSON.parse(localStorage.getItem('aion_avatar_versions') || '{}') || {}; }
+  catch (e) { return {}; }
+})();
+window.avatarUrl = function (kind) {
+  const file = _CHAT_AVATAR_FILES[kind];
+  if (!file) return `/public/${kind}.png`;
+  const v = _chatAvatarVersions[kind];
+  return `/public/${file}` + (v ? `?v=${v}` : '');
+};
+function _chatAvatarKeyFromSrc(src) {
+  if (!src) return null;
+  for (const k in _CHAT_AVATAR_FILES) { if (src.indexOf(_CHAT_AVATAR_FILES[k]) !== -1) return k; }
+  return null;
+}
+function applyAvatars() {
+  const imgs = document.querySelectorAll('img');
+  for (let i = 0; i < imgs.length; i++) {
+    const img = imgs[i];
+    const key = _chatAvatarKeyFromSrc(img.getAttribute('src') || '');
+    if (!key) continue;
+    const want = window.avatarUrl(key);
+    if (img.getAttribute('src') !== want) img.src = want;
+  }
+}
+function _refreshChatAvatarVersion(kind, version) {
+  if (!_CHAT_AVATAR_FILES[kind]) return;
+  _chatAvatarVersions[kind] = version;
+  try { localStorage.setItem('aion_avatar_versions', JSON.stringify(_chatAvatarVersions)); } catch (e) {}
+  applyAvatars();
+}
+async function _initChatAvatarVersions() {
+  try {
+    const res = await fetch('/api/avatar');
+    const d = await res.json();
+    const av = (d && d.avatars) || {};
+    for (const k in _CHAT_AVATAR_FILES) { if (av[k] && av[k].version) _chatAvatarVersions[k] = av[k].version; }
+    try { localStorage.setItem('aion_avatar_versions', JSON.stringify(_chatAvatarVersions)); } catch (e) {}
+    applyAvatars();
+  } catch (e) {}
+}
+_initChatAvatarVersions();
+
 function handleSync(msg) {
   const { type, data } = msg;
 
+  if (type === "avatar_changed") {
+    _refreshChatAvatarVersion(data && data.kind, data && data.version);
+    return;
+  }
   if (type === "conv_created") {
     if (!conversations.find(c => c.id === data.id)) {
       conversations.unshift(data);
@@ -1648,7 +1697,9 @@ function renderMessages() {
         ? `<div class="msg-bubbles">${renderMsgPart(displayContent)}${renderAttachments(messageAttachments)}</div>`
         : `<div class="msg-bubble">${formatMsg(displayContent)}${renderAttachments(messageAttachments)}</div>`;
     }
-    const avatarSrc = isUser ? '/public/UserIcon.png' : '/public/AIIcon.png';
+    const avatarSrc = (typeof window.avatarUrl === 'function')
+      ? window.avatarUrl(isUser ? 'user' : 'ai')
+      : (isUser ? '/public/UserIcon.png' : '/public/AIIcon.png');
     const ttsBtn = !isUser ? `<button class="tts-replay-btn" onclick="replayTTS('${m.id}')" title="重听语音">🔊</button>` : '';
     return `
     <div class="msg-row ${m.role}${isEmptyMessage ? ' empty-message' : ''}" id="m_${m.id}" data-msg-id="${m.id}">
@@ -5116,3 +5167,41 @@ async function openWalletPanel() {
 function closeWalletPanel() {
   $('walletPanelOverlay').classList.remove('show');
 }
+
+// ── 顶层头像文件选择器 ──
+// iframe 子页面（设置页）里的 <input type=file> 在 Android WebView 不触发
+// onShowFileChooser（WebView 只对主框架的 file input 响应）。所以子页面同步
+// 调用顶层函数触发选择器——必须同步调用以携带用户手势，否则 WebView 不弹
+// 选择器。选完图后顶层把 File 对象 postMessage 回当前可见的子页面 iframe
+// 处理（这步不需要手势，异步即可）。电脑浏览器直接访问 /settings（顶层）时，
+// 子页面自己的 input.click() 能正常弹出，不走这里。
+(function setupTopAvatarPicker() {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = 'image/*';
+  input.style.display = 'none';
+  document.body.appendChild(input);
+  let pickKind = null;
+
+  // 子页面同步调用：onclick → window.parent.triggerTopAvatarPicker(kind) → input.click()
+  // 整条链在同一同步调用栈里，用户手势有效，WebView 才会弹选择器。
+  window.triggerTopAvatarPicker = function (kind) {
+    pickKind = kind;
+    input.value = '';
+    input.click();
+  };
+
+  input.addEventListener('change', function () {
+    const file = input.files && input.files[0];
+    if (!file || !pickKind) return;
+    // 把 File 对象发回当前可见的子页面 iframe（结构化克隆支持 File/Blob）
+    const frames = document.querySelectorAll('.sub-page-frame');
+    for (let i = 0; i < frames.length; i++) {
+      const f = frames[i];
+      if (f.style.display !== 'none' && f.contentWindow) {
+        f.contentWindow.postMessage({ type: 'avatar_file', kind: pickKind, file: file }, '*');
+        break;
+      }
+    }
+  });
+})();

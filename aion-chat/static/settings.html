@@ -420,6 +420,47 @@ body[data-theme="light"] .ghost-btn {
   color: rgba(31,42,68,.76);
   background: rgba(255,255,255,.62);
 }
+.avatar-row {
+  display: flex;
+  gap: 28px;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  padding: 4px 0 2px;
+}
+.avatar-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 9px;
+}
+.avatar-preview {
+  width: 96px;
+  height: 96px;
+  border-radius: 50%;
+  object-fit: cover;
+  border: 2px solid rgba(255,255,255,0.14);
+  cursor: pointer;
+  background: rgba(0,0,0,0.22);
+  transition: transform .15s ease, box-shadow .15s ease;
+}
+.avatar-preview:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 22px rgba(0,0,0,.28);
+}
+.avatar-label {
+  color: rgba(255,255,255,0.78);
+  font-size: 13px;
+  font-weight: 600;
+}
+.avatar-actions {
+  display: flex;
+  gap: 6px;
+}
+body[data-theme="light"] .avatar-label { color: rgba(31,42,68,0.78); }
+body[data-theme="light"] .avatar-preview {
+  border-color: rgba(70,92,140,0.18);
+  background: rgba(0,0,0,0.04);
+}
 @media (max-width: 720px) {
   .settings-grid,
   .settings-grid.compact,
@@ -450,6 +491,38 @@ body[data-theme="light"] .ghost-btn {
         <button class="action-btn primary" onclick="saveSettings()">保存全部设置</button>
       </div>
     </div>
+
+    <details class="settings-card" open>
+      <summary>
+        <div class="summary-title">
+          <strong>🖼 头像</strong>
+          <span>聊天、朋友圈、陪伴阅读等页面的用户与 AI 头像</span>
+        </div>
+        <span class="summary-chevron">›</span>
+      </summary>
+      <div class="card-body">
+        <div class="avatar-row">
+          <div class="avatar-item">
+            <img class="avatar-preview" id="userAvatarPreview" src="/public/UserIcon.png" alt="用户头像" onclick="pickAvatar('user')">
+            <div class="avatar-label">用户头像</div>
+            <div class="avatar-actions">
+              <button class="ghost-btn" type="button" onclick="pickAvatar('user')">更换</button>
+              <button class="ghost-btn danger-btn" type="button" onclick="resetAvatar('user')">重置</button>
+            </div>
+          </div>
+          <div class="avatar-item">
+            <img class="avatar-preview" id="aiAvatarPreview" src="/public/AIIcon.png" alt="AI 头像" onclick="pickAvatar('ai')">
+            <div class="avatar-label">AI 头像</div>
+            <div class="avatar-actions">
+              <button class="ghost-btn" type="button" onclick="pickAvatar('ai')">更换</button>
+              <button class="ghost-btn danger-btn" type="button" onclick="resetAvatar('ai')">重置</button>
+            </div>
+          </div>
+        </div>
+        <input type="file" id="avatarFileInput" accept="image/*" style="display:none">
+        <p class="hint">任意格式图片都会自动居中裁剪成正方形并转成 PNG。换完即时生效，其他打开的页面也会自动刷新。</p>
+      </div>
+    </details>
 
     <details class="settings-card" open>
       <summary>
@@ -664,6 +737,121 @@ body[data-theme="light"] .ghost-btn {
 <script src="/static/common.js"></script>
 <script>
 connectCommonWS();
+
+// ── 头像上传 ──
+var _avatarPickKind = null;
+
+function pickAvatar(kind) {
+  _avatarPickKind = kind;
+  // 在 iframe 里（手机 App）：同步调用顶层触发函数。必须同步以携带用户手势，
+  // 否则 WebView 不会为 file input 弹出选择器。
+  if (window.parent !== window && typeof window.parent.triggerTopAvatarPicker === "function") {
+    window.parent.triggerTopAvatarPicker(kind);
+    return;
+  }
+  // 顶层访问（电脑浏览器直接开 /settings）：本地触发
+  var input = $("avatarFileInput");
+  if (!input) return;
+  input.value = "";
+  input.click();
+}
+
+function _avatarPreviewId(kind) {
+  return kind === "ai" ? "aiAvatarPreview" : "userAvatarPreview";
+}
+
+function _setAvatarPreviewSrc(kind, version) {
+  var img = $(_avatarPreviewId(kind));
+  if (!img) return;
+  var file = kind === "ai" ? "AIIcon.png" : "UserIcon.png";
+  img.src = "/public/" + file + (version ? "?v=" + version : "");
+}
+
+function _uploadAvatarFile(kind, file) {
+  var reader = new FileReader();
+  reader.onload = function (e) {
+    var im = new Image();
+    im.onload = function () {
+      var size = Math.min(im.width, im.height) || im.width || im.height || 1;
+      var canvas = document.createElement("canvas");
+      canvas.width = 512;
+      canvas.height = 512;
+      var ctx = canvas.getContext("2d");
+      // 居中正方形裁剪，缩放到 512×512
+      var sx = (im.width - size) / 2;
+      var sy = (im.height - size) / 2;
+      ctx.drawImage(im, sx, sy, size, size, 0, 0, 512, 512);
+      canvas.toBlob(function (blob) {
+        if (!blob) { showToast("图片处理失败"); return; }
+        var fd = new FormData();
+        fd.append("kind", kind);
+        fd.append("file", blob, "avatar.png");
+        showToast("正在上传…");
+        fetch("/api/avatar/upload", { method: "POST", body: fd })
+          .then(function (r) { return r.json(); })
+          .then(function (d) {
+            if (d.ok) {
+              _setAvatarPreviewSrc(kind, d.version);
+              showToast(kind === "ai" ? "✅ AI 头像已更新" : "✅ 用户头像已更新");
+            } else {
+              showToast(d.detail || "上传失败");
+            }
+          })
+          .catch(function () { showToast("上传失败，请重试"); });
+      }, "image/png");
+    };
+    im.onerror = function () { showToast("图片读取失败"); };
+    im.src = e.target.result;
+  };
+  reader.readAsDataURL(file);
+}
+
+(function () {
+  var input = $("avatarFileInput");
+  if (input) {
+    input.addEventListener("change", function () {
+      var file = this.files && this.files[0];
+      if (!file || !_avatarPickKind) return;
+      _uploadAvatarFile(_avatarPickKind, file);
+    });
+  }
+  // 接收顶层（chat.html）选完图发回的 File 对象——手机 App 里 settings 在 iframe，
+  // 自己的 file input 不触发选择器，所以委托顶层选，再把文件发回来。
+  window.addEventListener("message", function (e) {
+    var d = e.data;
+    if (!d || d.type !== "avatar_file" || !d.file) return;
+    _avatarPickKind = d.kind;
+    _uploadAvatarFile(d.kind, d.file);
+  });
+})();
+
+function resetAvatar(kind) {
+  fetch("/api/avatar/reset", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: "kind=" + encodeURIComponent(kind)
+  })
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
+      if (d.ok) {
+        _setAvatarPreviewSrc(kind, d.version);
+        showToast(kind === "ai" ? "AI 头像已重置" : "用户头像已重置");
+      } else {
+        showToast(d.detail || "重置失败");
+      }
+    })
+    .catch(function () { showToast("重置失败，请重试"); });
+}
+
+async function _loadAvatarVersions() {
+  try {
+    var r = await fetch("/api/avatar");
+    var d = await r.json();
+    var av = (d && d.avatars) || {};
+    if (av.user) _setAvatarPreviewSrc("user", av.user.version);
+    if (av.ai) _setAvatarPreviewSrc("ai", av.ai.version);
+  } catch (e) {}
+}
 
 var customModelRoutes = [];
 
@@ -968,6 +1156,7 @@ function collectAntigravityModels() {
   renderAntigravityModels();
   refreshPhoneScreenStatus();
   refreshMediaCacheStatus();
+  _loadAvatarVersions();
 })();
 
 async function saveSettings() {
