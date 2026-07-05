@@ -382,46 +382,58 @@ async def _ai_reply_to_moment(who: str, moment_id: str, target_comment_id: str =
         who, moment, context_msgs, recent_memories, target_comment_id
     )
 
-    # 调用 AI
+    # 确定模型与消息（这部分不重试，避免每次重试都重建上下文）
+    if who == "aion":
+        # 取用户最近私聊会话选用的模型
+        async with get_db() as _mdb:
+            _mdb.row_factory = aiosqlite.Row
+            _cur = await _mdb.execute(
+                "SELECT model FROM conversations ORDER BY updated_at DESC LIMIT 1"
+            )
+            _row = await _cur.fetchone()
+        _model = resolve_model_key(_row["model"] if _row else DEFAULT_MODEL)
+        _temp = SETTINGS.get("temperature")
+        _connor_is_codex = False
+    else:
+        cfg = load_chatroom_config()
+        _connor_key = (cfg.get("connor_model") or "Codex").strip() or "Codex"
+        _model = _connor_key
+        _connor_is_codex = (_model == "Codex")
+        _temp = None
+
+    model_messages = await _prepare_moment_messages_for_model(messages, _model)
+
+    # 调用 AI：最多 3 次，指数退避 1s/2s；只重试流式调用本身
+    # 瞬时网络/限流/CLI 抽风可被吃掉；模型选择/消息构建失败这类本地错误不会重试浪费
     full_text = ""
-    try:
-        if who == "aion":
-            # 取用户最近私聊会话选用的模型
-            async with get_db() as _mdb:
-                _mdb.row_factory = aiosqlite.Row
-                _cur = await _mdb.execute(
-                    "SELECT model FROM conversations ORDER BY updated_at DESC LIMIT 1"
-                )
-                _row = await _cur.fetchone()
-            _model = resolve_model_key(_row["model"] if _row else DEFAULT_MODEL)
-            _temp = SETTINGS.get("temperature")
-            model_messages = await _prepare_moment_messages_for_model(messages, _model)
-            async for chunk in stream_ai(model_messages, _model, temperature=_temp):
-                if chunk.startswith(CLI_STATUS_PREFIX):
-                    continue
-                full_text += chunk
-        else:
-            # Connor: 尝试 HTTP 服务，失败则走配置模型
-            result = None
-            if result and result != "__CONNOR_STILL_PROCESSING__":
-                full_text = result
+    MAX_RETRIES = 3
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            if who == "aion":
+                async for chunk in stream_ai(model_messages, _model, temperature=_temp):
+                    if chunk.startswith(CLI_STATUS_PREFIX):
+                        continue
+                    full_text += chunk
+            elif _connor_is_codex:
+                async for chunk in stream_connor_cli(messages=model_messages):
+                    if chunk.startswith(CLI_STATUS_PREFIX):
+                        continue
+                    full_text += chunk
             else:
-                cfg = load_chatroom_config()
-                _connor_key = (cfg.get("connor_model") or "Codex").strip() or "Codex"
-                model_messages = await _prepare_moment_messages_for_model(messages, _connor_key)
-                if _connor_key == "Codex":
-                    async for chunk in stream_connor_cli(messages=model_messages):
-                        if chunk.startswith(CLI_STATUS_PREFIX):
-                            continue
-                        full_text += chunk
-                else:
-                    async for chunk in stream_ai(model_messages, _connor_key, {}):
-                        if chunk.startswith(CLI_STATUS_PREFIX):
-                            continue
-                        full_text += chunk
-    except Exception as e:
-        print(f"[moments] AI 回复失败 ({who}): {e}")
-        return
+                async for chunk in stream_ai(model_messages, _model, {}):
+                    if chunk.startswith(CLI_STATUS_PREFIX):
+                        continue
+                    full_text += chunk
+            break  # 成功，跳出重试循环
+        except Exception as e:
+            full_text = ""  # 丢弃已积累的片段，避免拼接半截输出
+            if attempt < MAX_RETRIES:
+                wait = 2 ** (attempt - 1)  # 1s, 2s
+                print(f"[moments] AI 回复失败 ({who}, 第 {attempt}/{MAX_RETRIES} 次): {e} — {wait}s 后重试")
+                await asyncio.sleep(wait)
+            else:
+                print(f"[moments] AI 回复失败 ({who}, {MAX_RETRIES} 次都失败): {e}")
+                return
 
     expect_chat_decision = target_comment_id is None and moment.get("author") == "user"
     comment_text, send_chat_message, chat_message = _parse_moment_reply_result(
