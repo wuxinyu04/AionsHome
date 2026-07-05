@@ -9,6 +9,7 @@ from pathlib import Path
 import httpx
 
 from config import get_key, UPLOADS_DIR, PUBLIC_DIR
+from ai_providers import _make_http_client
 
 # 参考图位置（用于 SELFIE 模式）
 REFERENCE_IMAGE_PATH = PUBLIC_DIR / "生图锚点.jpg"
@@ -61,7 +62,7 @@ async def generate_image(prompt: str, is_selfie: bool = False) -> str | None:
     }
 
     try:
-        async with httpx.AsyncClient(timeout=IMAGE_GEN_TIMEOUT) as client:
+        async with _make_http_client(url, timeout=IMAGE_GEN_TIMEOUT) as client:
             print(f"[image_gen] 开始生图... prompt: {prompt[:80]}")
             resp = await client.post(url, json=payload)
             resp.raise_for_status()
@@ -108,5 +109,5 @@ async def generate_image(prompt: str, is_selfie: bool = False) -> str | None:
         print(f"[image_gen] API 请求失败 ({e.response.status_code}): {error_body}")
         return None
     except Exception as e:
-        print(f"[image_gen] 生图异常: {e}")
+        print(f"[image_gen] 生图异常: {type(e).__name__}: {e!r}")
         return None

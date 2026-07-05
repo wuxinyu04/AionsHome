@@ -1894,6 +1894,27 @@ async def send_message(conv_id: str, body: MsgCreate):
     return StreamingResponse(generate(), media_type="text/event-stream")
 
 # ── 异步生图任务 ─────────────────────────────────
+async def _insert_image_gen_failed_msg(conv_id: str, trigger_msg_id: str):
+    """生图失败时插入一条可见的失败提示消息，并广播 image_gen_failed。
+    消息持久化到 DB，即使 WS 此刻断开，前端重连/重新加载会话时也能看到失败反馈。"""
+    now = time.time()
+    fail_msg_id = f"msg_{int(now*1000)}_imgfail"
+    fail_content = "🎨 图片生成失败，请稍后再试"
+    att = []
+    async with get_db() as db:
+        await db.execute(
+            "INSERT INTO messages (id, conv_id, role, content, created_at, attachments) VALUES (?,?,?,?,?,?)",
+            (fail_msg_id, conv_id, "assistant", fail_content, now, json.dumps(att, ensure_ascii=False))
+        )
+        await db.execute("UPDATE conversations SET updated_at=? WHERE id=?", (now, conv_id))
+        await db.commit()
+    fail_msg = {"id": fail_msg_id, "conv_id": conv_id, "role": "assistant", "content": fail_content, "created_at": now, "attachments": att}
+    await manager.broadcast({"type": "msg_created", "data": fail_msg})
+    await manager.broadcast({"type": "image_gen_failed", "data": {"conv_id": conv_id, "trigger_msg_id": trigger_msg_id}})
+    await export_conversation(conv_id)
+    print("[image_gen] 生图失败，已通知前端")
+
+
 async def _do_image_gen(conv_id: str, trigger_msg_id: str, prompt: str, is_selfie: bool):
     """异步调用 Gemini 生图，成功后作为新 assistant 消息保存并广播"""
     from image_gen import generate_image
@@ -1920,12 +1941,11 @@ async def _do_image_gen(conv_id: str, trigger_msg_id: str, prompt: str, is_selfi
             await export_conversation(conv_id)
             print(f"[image_gen] 图片消息已创建: {img_msg_id}")
         else:
-            # 生图失败 → 通知前端
-            await manager.broadcast({"type": "image_gen_failed", "data": {"conv_id": conv_id, "trigger_msg_id": trigger_msg_id}})
-            print("[image_gen] 生图失败，已通知前端")
+            # 生图失败 → 插一条失败提示消息 + 通知前端
+            await _insert_image_gen_failed_msg(conv_id, trigger_msg_id)
     except Exception as e:
-        print(f"[image_gen] 异步生图任务异常: {e}")
-        await manager.broadcast({"type": "image_gen_failed", "data": {"conv_id": conv_id, "trigger_msg_id": trigger_msg_id}})
+        print(f"[image_gen] 异步生图任务异常: {type(e).__name__}: {e!r}")
+        await _insert_image_gen_failed_msg(conv_id, trigger_msg_id)
 
 
 # ── 服务端延迟触发监控查看（不再依赖前端 API 调用） ─────
