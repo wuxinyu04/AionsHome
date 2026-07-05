@@ -487,6 +487,12 @@ pre {
       </div>
     </div>
 
+    <div class="mode-row" style="margin-bottom:12px; display:flex; flex-wrap:wrap; gap:14px; align-items:center">
+      <strong style="font-size:14px">巡游模式</strong>
+      <label class="check"><input type="radio" name="roamMode" value="target" id="roamModeTarget" checked onchange="updateRoamModeHint()"> 盯目标账号</label>
+      <label class="check"><input type="radio" name="roamMode" value="free" id="roamModeFree" onchange="updateRoamModeHint()"> 自由巡游</label>
+      <span class="hint" id="roamModeHint" style="margin-left:auto">盯目标账号：看指定账号最新帖子</span>
+    </div>
     <div class="action-layout">
       <div class="inline-card">
         <h2>目标账号</h2>
@@ -505,7 +511,7 @@ pre {
       <div class="inline-card">
         <h2>行动说明</h2>
         <label>给角色的本次目标</label>
-        <textarea id="taskInstructionInput" placeholder="例如：看目标账号最新帖子和评论区，合适时回复一条评论。"></textarea>
+        <textarea id="taskInstructionInput" placeholder="例如：搜情侣头像看看 / 随便逛逛推荐 / 看目标账号评论区，合适时回复。"></textarea>
       </div>
     </div>
 
@@ -669,12 +675,13 @@ function statusName(status) {
     observed:'只观察',
     drafted:'已生成草稿',
     commented:'已评论',
-    replied:'已回复'
+    replied:'已回复',
+    no_notes:'没拿到帖子'
   }[status] || (status || '完成');
 }
 function statusTone(status, ok = true) {
   if (!ok) return 'error';
-  if (status === 'drafted' || status === 'observed') return 'warn';
+  if (status === 'drafted' || status === 'observed' || status === 'no_notes') return 'warn';
   if (status === 'commented' || status === 'replied') return 'ok';
   return 'ok';
 }
@@ -727,7 +734,14 @@ function summarizeObject(value) {
       ? result.actor_name + '：' + statusName(status)
       : '操作完成';
     const lines = [];
-    if (target.nickname || target.user_id) lines.push('目标：' + (target.nickname || target.user_id));
+    if (result.roam_mode === 'free') {
+      if (result.source === 'search') lines.push('搜索：' + (result.keyword || '（空）'));
+      else if (result.source === 'browse') lines.push('来源：推荐流');
+      else if (result.source === 'observe') lines.push('来源：没动手');
+      else if (target.nickname || target.user_id) lines.push('目标：' + (target.nickname || target.user_id));
+    } else if (target.nickname || target.user_id) {
+      lines.push('目标：' + (target.nickname || target.user_id));
+    }
     if (note.title || note.note_id) lines.push('帖子：' + (note.title || note.note_id));
     if (result.comment_text) lines.push('评论：' + brief(result.comment_text, 180));
     else if (decision.reason || result.error) lines.push('说明：' + brief(decision.reason || result.error, 180));
@@ -761,6 +775,15 @@ function setStatus(value, tone) {
     summarizeObject(value);
   }
 }
+function updateRoamModeHint() {
+  const hint = $('roamModeHint');
+  if (!hint) return;
+  if ($('roamModeFree').checked) {
+    hint.textContent = '自由巡游：AI 自己决定搜关键词还是逛推荐流，目标账号可选填';
+  } else {
+    hint.textContent = '盯目标账号：看指定账号最新帖子';
+  }
+}
 function updateTargetSummary() {
 }
 async function loadConfig(options = {}) {
@@ -768,6 +791,10 @@ async function loadConfig(options = {}) {
   $('enabledInput').checked = !!currentConfig.enabled;
   $('autoEnabledInput').checked = !!currentConfig.auto_enabled;
   $('writeInput').checked = !!currentConfig.allow_write_comments;
+  const roamMode = (currentConfig.roam_mode || 'target').toLowerCase() === 'free' ? 'free' : 'target';
+  $('roamModeFree').checked = (roamMode === 'free');
+  $('roamModeTarget').checked = (roamMode === 'target');
+  updateRoamModeHint();
   $('targetUserIdInput').value = currentConfig.target_user_id || '';
   $('targetNicknameInput').value = currentConfig.target_nickname || '';
   $('targetXsecInput').value = currentConfig.target_xsec_token || '';
@@ -798,6 +825,7 @@ function collectPayload() {
   const payload = {
     enabled: $('enabledInput').checked,
     auto_enabled: $('autoEnabledInput').checked,
+    roam_mode: $('roamModeFree').checked ? 'free' : 'target',
     allow_write_comments: $('writeInput').checked,
     use_following_list: false,
     clear_cookie: $('clearCookieInput').checked,

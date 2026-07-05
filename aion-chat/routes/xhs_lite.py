@@ -17,6 +17,7 @@ class XhsActorConfig(BaseModel):
 class XhsConfigUpdate(BaseModel):
     enabled: Optional[bool] = None
     auto_enabled: Optional[bool] = None
+    roam_mode: Optional[str] = None
     cookie: Optional[str] = None
     clear_cookie: Optional[bool] = None
     target_user_id: Optional[str] = None
@@ -60,6 +61,9 @@ async def update_config(body: XhsConfigUpdate):
         value = getattr(body, key)
         if value is not None:
             updates[key] = value
+    if body.roam_mode is not None:
+        mode = body.roam_mode.strip().lower()
+        updates["roam_mode"] = mode if mode in ("target", "free") else "target"
     if body.max_following_pages is not None:
         updates["max_following_pages"] = max(1, min(10, int(body.max_following_pages)))
     if body.write_delay_seconds is not None:

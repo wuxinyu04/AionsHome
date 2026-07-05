@@ -16,6 +16,7 @@ from config import DEFAULT_MODEL, MODELS, load_worldbook, SETTINGS, UPLOADS_DIR,
 from database import get_db
 from ws import manager
 from ai_providers import stream_ai, CLI_STATUS_PREFIX
+from xhs_chat_tool import stream_ai_with_xhs_tool, XHS_TOOL_PROMPT
 from memory import recall_memories, instant_digest, fetch_source_details, build_surfacing_memories, get_embedding, _pack_embedding, _memory_line_with_evidence
 from camera import cam, CAM_CHECK_CMD, perform_cam_check
 from activity import get_activity_summary_for_prompt, get_user_dynamics_for_prompt
@@ -919,6 +920,8 @@ async def edit_resend_message(msg_id: str, body: MsgEditResend):
     if wb.get("system_prompt") and wb.get("system_prompt_enabled", True):
         prefix.append({"role": "user", "content": f"[系统提示]\n{wb['system_prompt']}"})
         prefix.append({"role": "assistant", "content": "收到，我会遵循这些规则。"})
+    prefix.append({"role": "user", "content": XHS_TOOL_PROMPT})
+    prefix.append({"role": "assistant", "content": "收到，需要小红书站内搜索时我会用 <xhs_search> 标记。"})
     if prefix:
         history = prefix + history
 
@@ -1025,7 +1028,7 @@ async def edit_resend_message(msg_id: str, body: MsgEditResend):
         try:
             await _q.put({"id": ai_msg_id, "type": "start"})
             try:
-                async for chunk in stream_ai(history, model_key, usage_meta, max_tokens=body.max_tokens, cancel_event=cancel_event):
+                async for chunk in stream_ai_with_xhs_tool(history, model_key, usage_meta, max_tokens=body.max_tokens, cancel_event=cancel_event):
                     if chunk.startswith(CLI_STATUS_PREFIX):
                         await _q.put({"type": "cli_status", "text": chunk[len(CLI_STATUS_PREFIX):]})
                         continue
@@ -1379,6 +1382,8 @@ async def send_message(conv_id: str, body: MsgCreate):
     if wb.get("system_prompt") and wb.get("system_prompt_enabled", True):
         prefix.append({"role": "user", "content": f"[系统提示]\n{wb['system_prompt']}"})
         prefix.append({"role": "assistant", "content": "收到，我会遵循这些规则。"})
+    prefix.append({"role": "user", "content": XHS_TOOL_PROMPT})
+    prefix.append({"role": "assistant", "content": "收到，需要小红书站内搜索时我会用 <xhs_search> 标记。"})
     if prefix:
         history = prefix + history
 
@@ -1551,7 +1556,7 @@ async def send_message(conv_id: str, body: MsgCreate):
         try:
             await _q.put({"id": ai_msg_id, "type": "start"})
             try:
-                async for chunk in stream_ai(history, model_key, usage_meta, max_tokens=body.max_tokens, cancel_event=cancel_event):
+                async for chunk in stream_ai_with_xhs_tool(history, model_key, usage_meta, max_tokens=body.max_tokens, cancel_event=cancel_event):
                     if chunk.startswith(CLI_STATUS_PREFIX):
                         await _q.put({"type": "cli_status", "text": chunk[len(CLI_STATUS_PREFIX):]})
                         continue

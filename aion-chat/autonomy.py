@@ -994,18 +994,39 @@ async def _run_xhs_roam(actor: str) -> dict:
     note = result.get("note") or {}
     target = result.get("target") or {}
     status = str(result.get("status") or "")
+    roam_mode = str(result.get("roam_mode") or "target")
+    source = str(result.get("source") or "")
+    keyword = str(result.get("keyword") or "")
     if result.get("wrote") and status == "replied":
         title = f"{actor_name}在小红书回复了评论"
     elif result.get("wrote"):
         title = f"{actor_name}在小红书留下了评论"
     elif status == "drafted":
         title = f"{actor_name}看了小红书并写了评论草稿"
+    elif roam_mode == "free":
+        if source == "search":
+            title = f"{actor_name}在小红书搜了「{keyword}」"
+        elif source == "browse":
+            title = f"{actor_name}逛了逛小红书推荐"
+        elif source == "observe":
+            title = f"{actor_name}在小红书转了一圈没动手"
+        else:
+            title = f"{actor_name}去小红书自由逛了逛"
     else:
         title = f"{actor_name}去小红书看了指定账号最新帖子"
-    detail_parts = [
-        f"目标：{target.get('nickname') or target.get('user_id') or '未命名账号'}",
-        f"帖子：{note.get('title') or note.get('note_id') or '未知帖子'}",
-    ]
+    detail_parts = []
+    if roam_mode == "free":
+        if source == "search":
+            detail_parts.append(f"来源：搜索「{keyword}」")
+        elif source == "browse":
+            detail_parts.append("来源：推荐流")
+        elif source == "target" and target:
+            detail_parts.append(f"目标：{target.get('nickname') or target.get('user_id') or '未命名账号'}")
+        else:
+            detail_parts.append(f"来源：{source or '自由巡游'}")
+    else:
+        detail_parts.append(f"目标：{target.get('nickname') or target.get('user_id') or '未命名账号'}")
+    detail_parts.append(f"帖子：{note.get('title') or note.get('note_id') or '未知帖子'}")
     if result.get("comment_text"):
         detail_parts.append(f"评论：{result['comment_text']}")
     event = await append_idle_event(
@@ -1018,6 +1039,9 @@ async def _run_xhs_roam(actor: str) -> dict:
         result_type="xhs_comment" if result.get("wrote") else "xhs_view",
         metadata={
             "status": status,
+            "roam_mode": roam_mode,
+            "source": source,
+            "keyword": keyword,
             "target": target,
             "note": note,
             "wrote": bool(result.get("wrote")),
