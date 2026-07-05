@@ -89,3 +89,7 @@ AionApp/local.properties
 *.log
 .DS_Store
 Thumbs.db
+
+# ── 头像默认备份（换头像时自动生成，每人不同） ──
+public/UserIcon.default.png
+public/AIIcon.default.png
