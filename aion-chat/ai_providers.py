@@ -1780,6 +1780,7 @@ async def simple_ai_call(
     messages: list,
     model_key: str,
     temperature: float | None = None,
+    max_tokens: int | None = None,
     *,
     trace_label: str = "simple_ai_call",
 ) -> str:
@@ -1790,7 +1791,7 @@ async def simple_ai_call(
     raw_chunks = []
     error = ""
     try:
-        async for chunk in stream_ai(messages, model_key, temperature=temperature):
+        async for chunk in stream_ai(messages, model_key, temperature=temperature, max_tokens=max_tokens):
             raw_chunks.append(chunk)
             if chunk.startswith(CLI_STATUS_PREFIX):
                 continue

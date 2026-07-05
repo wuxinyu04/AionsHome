@@ -50,6 +50,18 @@
 .digest-status.success { background:#e8f5e9; color:#2e7d32; }
 .digest-status.info { background:#e3f2fd; color:#1565c0; }
 .digest-status.error { background:#fce4ec; color:#c62828; }
+.digest-runs { margin-top:10px; border:1px solid var(--border); border-radius:8px; background:var(--surface); overflow:hidden; flex-shrink:0; }
+.digest-runs-head { padding:8px 12px; background:var(--surface2); font-size:13px; font-weight:600; color:var(--text); display:flex; justify-content:space-between; align-items:center; }
+.digest-runs-head .refresh { font-size:12px; color:var(--accent); cursor:pointer; font-weight:600; }
+.digest-runs-list { max-height:260px; overflow-y:auto; }
+.digest-run-row { padding:7px 12px; border-top:1px solid var(--border); font-size:12px; line-height:1.5; color:var(--text2); }
+.digest-run-row:first-child { border-top:none; }
+.run-badge { display:inline-block; padding:1px 6px; border-radius:3px; font-size:11px; margin-right:6px; font-weight:600; }
+.run-badge.auto { background:#e3f2fd; color:#1565c0; }
+.run-badge.manual { background:#f3e5f5; color:#6a4c93; }
+.run-ok { color:#2e7d32; font-weight:600; }
+.run-fail { color:#c62828; font-weight:600; }
+.run-msg { display:block; color:var(--text3); margin-top:2px; word-break:break-word; }
 .compress-review { margin-top:8px; max-height:40vh; overflow-y:auto; flex-shrink:0; border:1px solid var(--border); border-radius:8px; background:var(--surface); padding:10px; font-size:12px; line-height:1.45; }
 .compress-review-head { display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:6px; }
 .compress-review-title { font-weight:700; color:var(--text); }
@@ -167,6 +179,13 @@
       <button class="btn-digest" id="digestBtn" onclick="triggerDigest()">📝 总结新记忆</button>
       <button class="btn-digest" id="rebuildBtn" onclick="rebuildEmbeddings()" style="background:#1565c0">🔄 重建向量索引</button>
     </div>
+    <div class="digest-runs" id="digestRunsPanel" style="display:none">
+      <div class="digest-runs-head">
+        <span>📋 总结运行记录</span>
+        <span class="refresh" onclick="loadDigestRuns()">刷新</span>
+      </div>
+      <div class="digest-runs-list" id="digestRunsList"></div>
+    </div>
     <div class="compress-review" id="compressReview" style="display:none"></div>
   </div>
 </div>
@@ -244,6 +263,7 @@ connectCommonWS(msg => {
 (async function init() {
   await loadMemories();
   loadAnchor();
+  loadDigestRuns();
   loadCompressionDraft();
 })();
 
@@ -463,6 +483,31 @@ async function triggerDigest() {
     btn.disabled = false;
     btn.textContent = "📝 总结新记忆";
     setTimeout(() => { statusEl.style.display = "none"; }, 5000);
+    loadDigestRuns();
+  }
+}
+
+async function loadDigestRuns() {
+  try {
+    const res = await api("GET", "/api/memories/digest/runs?limit=15");
+    const runs = res.runs || [];
+    const panel = $("digestRunsPanel");
+    const list = $("digestRunsList");
+    if (!runs.length) { panel.style.display = "none"; return; }
+    panel.style.display = "block";
+    const esc = s => String(s||"").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+    list.innerHTML = runs.map(r => {
+      const t = new Date(r.ts * 1000);
+      const ts = `${t.getMonth()+1}/${t.getDate()} ${String(t.getHours()).padStart(2,'0')}:${String(t.getMinutes()).padStart(2,'0')}`;
+      const badge = r.trigger === "auto" ? '<span class="run-badge auto">自动</span>' : '<span class="run-badge manual">手动</span>';
+      const okBadge = r.ok ? '<span class="run-ok">✓</span>' : '<span class="run-fail">✗</span>';
+      const memInfo = r.new_memories_count > 0 ? ` · ${r.new_memories_count} 条新记忆` : "";
+      const diaryInfo = r.diary_ok === false ? ' · <span class="run-fail">日记失败</span>' : "";
+      const msg = r.message ? `<span class="run-msg">${esc(r.message)}</span>` : "";
+      return `<div class="digest-run-row">${badge}${ts} ${okBadge}${memInfo}${diaryInfo}${msg}</div>`;
+    }).join("");
+  } catch(e) {
+    console.warn("loadDigestRuns failed", e);
   }
 }
 

@@ -111,6 +111,34 @@ async def _auto_digest_loop():
             print(f"[auto_digest] ❌ 异常: {e}")
 
 
+# ── 自动记忆压缩定时任务 ──────────────────────────
+async def _auto_daily_compress_loop():
+    """每天检查一次，距上次压缩 >= 30 天则自动压缩 15 天以上的日常记忆（按年龄分档策略）。"""
+    import aiosqlite, time as _time
+    from memory import generate_daily_compression_draft, apply_daily_compression_review
+    while True:
+        await asyncio.sleep(24 * 3600)
+        try:
+            async with get_db() as db:
+                db.row_factory = aiosqlite.Row
+                cur = await db.execute("SELECT MAX(created_at) AS last_ts FROM daily_memory_compress_log")
+                row = await cur.fetchone()
+            last_ts = (row["last_ts"] if row and row["last_ts"] else 0)
+            if last_ts and (_time.time() - last_ts) < 30 * 86400:
+                continue
+            draft = await generate_daily_compression_draft(days=15, target="both")
+            if not draft.get("ok") or not draft.get("review"):
+                print(f"[auto_compress] 生成草稿失败: {draft.get('message', '')}")
+                continue
+            review_id = draft["review"]["id"]
+            result = await apply_daily_compression_review(review_id)
+            print(f"[auto_compress] {result.get('message', '')}")
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            print(f"[auto_compress] ❌ 异常: {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
@@ -145,6 +173,7 @@ async def lifespan(app: FastAPI):
     # 自动记忆总结定时任务
     digest_task = asyncio.create_task(_auto_digest_loop())
     cr_digest_task = asyncio.create_task(_connor_1v1_auto_digest_loop())
+    compress_task = asyncio.create_task(_auto_daily_compress_loop())
     persona_evolution_task = asyncio.create_task(main_ai_persona_evolution_loop())
     connor_persona_evolution_task = asyncio.create_task(connor_persona_evolution_loop())
     idle_autonomy_mgr.start()

@@ -318,6 +318,29 @@ async def trigger_digest():
     return await manual_digest()
 
 
+@router.get("/api/memories/digest/runs")
+async def list_digest_runs(limit: int = 20):
+    """返回最近的 digest 运行记录（从 data/digest_runs.jsonl 末尾读）。"""
+    import json
+    from config import DATA_DIR
+    log_path = DATA_DIR / "digest_runs.jsonl"
+    if not log_path.exists():
+        return {"runs": []}
+    try:
+        lines = log_path.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return {"runs": []}
+    runs = []
+    for line in reversed(lines):
+        try:
+            runs.append(json.loads(line))
+        except Exception:
+            continue
+        if len(runs) >= limit:
+            break
+    return {"runs": runs}
+
+
 @router.post("/api/memories/compress-daily")
 async def trigger_daily_compression(body: Optional[DailyCompressionRequest] = None):
     payload = body or DailyCompressionRequest()

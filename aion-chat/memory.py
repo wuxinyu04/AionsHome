@@ -1258,6 +1258,37 @@ async def _generate_digest_diary(
     }
 
 
+async def _digest_summarize_group(ai_messages: list, model_key: str) -> dict | None:
+    """
+    调用模型总结一组对话，返回解析后的 JSON dict。
+    容错链：
+      1. 主模型调用异常或返回非 JSON → 回退 DEFAULT_MODEL 重试一次；
+      2. 仍非 JSON（常见于输出被 max_tokens 截断）→ 用正则从残缺 JSON 里抢救已完整的记忆条目；
+      3. 都失败返回 None，调用方据此熔断本轮。
+    """
+    from ai_providers import simple_ai_call
+    candidates = []
+    for m in (model_key, DEFAULT_MODEL):
+        if m and m not in candidates:
+            candidates.append(m)
+    for mk in candidates:
+        try:
+            raw = await simple_ai_call(ai_messages, mk, trace_label="memory_digest_summary", max_tokens=8192)
+        except Exception as e:
+            print(f"[digest] 模型调用失败({mk})，尝试下一个候选: {e}")
+            continue
+        result = _parse_json_response(raw)
+        if result:
+            return result
+        # JSON 不完整（多半被 max_tokens 截断）—— 抢救已写完的条目，避免整组丢失
+        recovered = _recover_digest_memory_items_from_text(raw)
+        if recovered:
+            print(f"[digest] JSON 不完整({mk})，从截断响应中抢救出 {len(recovered)} 条记忆")
+            return {"memories": recovered}
+        print(f"[digest] JSON 解析失败({mk}): {str(raw)[:200]}")
+    return None
+
+
 async def _do_digest(min_messages: int = 0, allow_ai_wishes: bool = False) -> dict:
     """
     核心总结逻辑，manual_digest 和 auto_digest 共用。
@@ -1398,18 +1429,10 @@ async def _do_digest(min_messages: int = 0, allow_ai_wishes: bool = False) -> di
             companion_name=connor_name,
         )
 
-        # 用核心模型调用
+        # 用核心模型调用（失败自动回退 DEFAULT_MODEL，覆盖调用异常与非 JSON 两种情况）
         ai_messages = [{"role": "user", "content": prompt}]
-        try:
-            raw_text = await simple_ai_call(ai_messages, model_key, trace_label="memory_digest_summary")
-        except Exception as e:
-            print(f"[digest] 核心模型调用失败: {e}")
-            model_failure_detected = True
-            break
-
-        result = _parse_json_response(raw_text)
+        result = await _digest_summarize_group(ai_messages, model_key)
         if not result:
-            print(f"[digest] JSON 解析失败: {raw_text[:200]}")
             model_failure_detected = True
             break
 
@@ -1580,7 +1603,7 @@ async def _do_digest(min_messages: int = 0, allow_ai_wishes: bool = False) -> di
                 except Exception as e:
                     print(f"[digest] 执行送礼决定失败: {e}")
                 diary_generation["message"] = "日记已生成" + (
-                    "，并发布了朋友圈" if diary_generation["moment_published"] else "，本次未选择发布朋友圈"
+                    "，并发布了朋友圈" if diary_generation.get("moment_published") else "，本次未选择发布朋友圈"
                 )
         except Exception as e:
             print(f"[digest] 生成日记失败: {e}")
@@ -1652,14 +1675,40 @@ async def _do_digest(min_messages: int = 0, allow_ai_wishes: bool = False) -> di
     }
 
 
+async def _log_digest_run(trigger: str, result: dict) -> None:
+    """追加一次 digest 运行结果到 data/digest_runs.jsonl，供前端展示与排查。"""
+    try:
+        from config import DATA_DIR
+        dg = result.get("diary_generation") or {}
+        entry = {
+            "ts": time.time(),
+            "trigger": trigger,
+            "ok": bool(result.get("ok")),
+            "new_memories_count": int(result.get("new_memories_count", 0) or 0),
+            "processed_messages": int(result.get("processed_messages", 0) or 0),
+            "message": str(result.get("message", ""))[:500],
+            "diary_ok": bool(dg.get("ok")),
+            "diary_message": str(dg.get("message", ""))[:300],
+        }
+        log_path = DATA_DIR / "digest_runs.jsonl"
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception as e:
+        print(f"[digest] 记录运行日志失败: {e}")
+
+
 async def manual_digest() -> dict:
     """手动触发记忆总结（无最低条数限制）"""
-    return await _do_digest(min_messages=0, allow_ai_wishes=False)
+    result = await _do_digest(min_messages=0, allow_ai_wishes=False)
+    await _log_digest_run("manual", result)
+    return result
 
 
 async def auto_digest() -> dict:
     """自动定时记忆总结（至少 30 条未总结消息才执行）"""
-    return await _do_digest(min_messages=30, allow_ai_wishes=True)
+    result = await _do_digest(min_messages=30, allow_ai_wishes=True)
+    await _log_digest_run("auto", result)
+    return result
 
 
 async def _ensure_daily_compression_schema():
