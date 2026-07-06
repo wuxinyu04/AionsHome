@@ -1217,7 +1217,7 @@ async def _run_wish_pool(actor: str) -> dict:
         if SETTINGS.get("image_gen_enabled", False)
         else "当前没有启用图片生成功能。"
     )
-    music_ability = "[MUSIC:歌曲名 歌手名] — 当愿望是点播或推荐一首现有歌曲时使用。"
+    music_ability = "[MUSIC:歌曲名 歌手名] — 当愿望是点播或推荐一首现有歌曲时使用。可连续点播多首加入队列依次连播；你能感知当前在放的曲目与「我们一起听过的歌」。"
     result = await _ask_actor_json(actor, (
         "[查看许愿池并尝试实现愿望]\n"
         f"你刚刚从许愿池打捞起了 {user_name} 的愿望：\n{wish.get('content') or ''}\n\n"

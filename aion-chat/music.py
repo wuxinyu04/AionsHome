@@ -4,10 +4,10 @@
 会话每 2 小时自动刷新，获取音频失败时自动重试一次
 """
 
-import logging, threading, time
+import logging, threading, time, re
 from pyncm.apis.login import LoginViaAnonymousAccount, LoginViaCookie
 from pyncm.apis.cloudsearch import GetSearchResult
-from pyncm.apis.track import GetTrackDetail, GetTrackAudio
+from pyncm.apis.track import GetTrackDetail, GetTrackAudio, GetTrackLyrics
 
 log = logging.getLogger(__name__)
 
@@ -118,3 +118,35 @@ def get_audio_url(song_id: int) -> str | None:
         if url:
             return url
     return None
+
+
+_LRC_TS = re.compile(r"\[(\d{1,2}):(\d{1,2})(?:[.:](\d{1,3}))?\]")
+
+def get_lyrics(song_id: int) -> dict:
+    """获取歌词。返回 {lrc, plain, synced}：lrc 原始带时间戳；plain 纯文本；synced 为排序后的 [{t, text}]"""
+    _ensure_login()
+    try:
+        resp = GetTrackLyrics(str(song_id))
+    except Exception as e:
+        log.warning("get_lyrics(%s) 失败: %s", song_id, e)
+        return {"lrc": "", "plain": "", "synced": []}
+    lrc = (resp.get("lrc") or {}).get("lyric") or ""
+    # 解析时间戳行（一首歌可能一行多时间戳）
+    synced = []
+    for line in lrc.splitlines():
+        matches = list(_LRC_TS.finditer(line))
+        if not matches:
+            continue
+        text = _LRC_TS.sub("", line).strip()
+        for m in matches:
+            mm = int(m.group(1)); ss = int(m.group(2))
+            frac = m.group(3)
+            ms = 0
+            if frac:
+                f = frac.ljust(3, "0")[:3]
+                ms = int(f)
+            t = mm * 60 + ss + ms / 1000.0
+            synced.append({"t": round(t, 3), "text": text})
+    synced.sort(key=lambda x: x["t"])
+    plain = "\n".join(s["text"] for s in synced if s["text"]) if synced else _LRC_TS.sub("", lrc).strip()
+    return {"lrc": lrc, "plain": plain, "synced": synced}

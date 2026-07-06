@@ -347,7 +347,7 @@ class ScheduleManager:
                 prefix[-1]["content"] += f"\n系统当前的准确时间是 {now_str}"
 
             abilities = []
-            abilities.append("[MUSIC:歌曲名 歌手名] — 点歌/推荐音乐。系统自动展示播放卡片并自动播放，不要在指令外重复歌曲信息。可同时用多个。")
+            abilities.append("[MUSIC:歌曲名 歌手名] — 点歌/推荐音乐。可连续点播多首加入播放队列依次连播；你能感知当前在放的曲目与「我们一起听过的歌」。不要在指令外重复歌曲信息。")
             abilities.append("[ALARM:YYYY-MM-DDTHH:MM|内容] — 设置闹铃，到时间系统会主动提醒用户。日期时间用ISO格式。")
             abilities.append("[REMINDER:YYYY-MM-DD|内容] — 设置日程提醒（不闹铃），你在合适时机自然提起即可。")
             abilities.append(f"[Monitor:YYYY-MM-DDTHH:MM|内容] — 设置定时监督。到时间后系统自动截取摄像头画面发送给你，你可以查看{user_name}的状态。")
@@ -626,7 +626,7 @@ class ScheduleManager:
                 prefix[-1]["content"] += f"\n系统当前的准确时间是 {now_str}"
 
             abilities = []
-            abilities.append("[MUSIC:歌曲名 歌手名] — 点歌/推荐音乐。系统自动展示播放卡片并自动播放，不要在指令外重复歌曲信息。可同时用多个。")
+            abilities.append("[MUSIC:歌曲名 歌手名] — 点歌/推荐音乐。可连续点播多首加入播放队列依次连播；你能感知当前在放的曲目与「我们一起听过的歌」。不要在指令外重复歌曲信息。")
             abilities.append("[ALARM:YYYY-MM-DDTHH:MM|内容] — 设置闹铃，到时间系统会主动提醒用户。日期时间用ISO格式。")
             abilities.append("[REMINDER:YYYY-MM-DD|内容] — 设置日程提醒（不闹铃），你在合适时机自然提起即可。")
             abilities.append(f"[Monitor:YYYY-MM-DDTHH:MM|内容] — 设置定时监督。到时间后系统自动截取摄像头画面发送给你，你可以查看{user_name}的状态。")

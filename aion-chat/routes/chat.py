@@ -22,6 +22,7 @@ from camera import cam, CAM_CHECK_CMD, perform_cam_check
 from activity import get_activity_summary_for_prompt, get_user_dynamics_for_prompt
 from routes.files import export_conversation
 from routes.music import MUSIC_CMD_PATTERN
+import playback
 from song_gen import SONG_CMD_PATTERN, clean_song_visible_reply
 from tts import TTSStreamer
 
@@ -548,6 +549,12 @@ async def _video_call_sys_msg(conv_id: str, duration: int):
 
 async def _music_sys_msg(conv_id: str, music_cards: list):
     """为点歌操作插入系统消息，使后续上下文能看到点歌信息"""
+    # 记录到"一起听过的歌"共享记忆（去重 + play_count）
+    for s in music_cards:
+        try:
+            playback.log_shared(s)
+        except Exception:
+            pass
     wb = load_worldbook()
     ai_name = wb.get("ai_name", "AI")
     parts = [f"《{s['name']}》- {s['artist']}" for s in music_cards]

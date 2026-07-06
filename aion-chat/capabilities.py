@@ -42,7 +42,7 @@ CATEGORY_LABELS = {
 
 
 CAPABILITY_DEFS: list[CapabilityDef] = [
-    CapabilityDef("music", "点歌", "media", "注入 [MUSIC:歌曲名 歌手名]，让模型可以点歌或推荐音乐。"),
+    CapabilityDef("music", "点歌", "media", "注入 [MUSIC:歌曲名 歌手名]，让模型可以点歌或推荐音乐；支持多首连播，并能感知当前在放的曲目。"),
     CapabilityDef("cam_check", "查看监控/状态", "core", "注入 [CAM_CHECK]，让模型可以主动请求查看当前画面。"),
     CapabilityDef("schedule", "闹铃/日程/监督", "core", "注入闹铃、日程、定时监督和删除日程指令；关闭后也不注入当前日程列表。"),
     CapabilityDef("home", "智能家居", "life", "注入 [HOME:...]，让模型可以控制或查询 Home Assistant 设备。"),
@@ -254,8 +254,9 @@ async def build_capability_prompt_items(
 
     if is_capability_enabled("music"):
         abilities.append(
-            "[MUSIC:歌曲名 歌手名] — 点歌/推荐音乐。系统自动展示播放卡片，"
-            "不要在指令外重复歌曲信息。可同时用多个。"
+            "[MUSIC:歌曲名 歌手名] — 点歌/推荐音乐。可连续点播多首，系统加入播放队列依次连播。"
+            "你能感知当前正在播放的曲目与「我们一起听过的歌」，可自然地就音乐评论或回忆。"
+            "不要在指令外重复歌曲信息。"
         )
 
     if is_capability_enabled("cam_check"):

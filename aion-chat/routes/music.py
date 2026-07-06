@@ -9,7 +9,8 @@ from pydantic import BaseModel
 
 import httpx
 
-from music import search_songs, get_song_detail, get_audio_url
+from music import search_songs, get_song_detail, get_audio_url, get_lyrics
+import playback
 
 router = APIRouter()
 
@@ -48,6 +49,57 @@ async def music_play(body: MusicPlayRequest):
     song["audio_url"] = get_audio_url(song["id"])
     song["candidates"] = results[1:]  # 备选
     return song
+
+
+@router.get("/api/music/lyrics/{song_id}")
+async def music_lyrics(song_id: int):
+    """获取歌词（带 [mm:ss] 时间戳，前端逐行滚动）"""
+    return get_lyrics(song_id)
+
+
+class NowPlayingRequest(BaseModel):
+    song_id: int | None = None
+    name: str = ""
+    artist: str = ""
+    state: str = "playing"
+    position: float = 0
+    queue_count: int = 0
+
+
+@router.post("/api/music/now_playing")
+async def music_now_playing(body: NowPlayingRequest):
+    """前端节流上报当前播放状态，供 context_builder 注入 AI 上下文（"AI 感知"）"""
+    if body.song_id is None:
+        playback.clear_now_playing()
+    else:
+        playback.set_now_playing(body.model_dump())
+    return {"ok": True}
+
+
+@router.get("/api/music/now_playing")
+async def music_now_playing_get():
+    """读取当前播放状态（恢复/其他端读取）"""
+    return playback.get_now_playing() or {}
+
+
+class SharedSongRequest(BaseModel):
+    song_id: int
+    name: str = ""
+    artist: str = ""
+    cover: str = ""
+
+
+@router.post("/api/music/shared")
+async def music_shared_add(body: SharedSongRequest):
+    """记录一首"一起听过的歌"（去重 + play_count）"""
+    playback.log_shared(body.model_dump())
+    return {"ok": True}
+
+
+@router.get("/api/music/shared")
+async def music_shared_list(limit: int = Query(50, ge=1, le=500)):
+    """读取"一起听过的歌"历史"""
+    return {"songs": playback.get_shared(limit=limit)}
 
 
 @router.get("/api/music/stream/{song_id}")

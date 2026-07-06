@@ -210,6 +210,25 @@ async def build_ability_block(
         except Exception:
             pass
 
+    if is_capability_enabled("music"):
+        try:
+            import playback
+            np = playback.get_now_playing()
+            if np and np.get("name"):
+                st = "播放中" if np.get("state") != "paused" else "已暂停"
+                qc = int(np.get("queue_count", 0) or 0)
+                line = f"【当前音乐】\n正在{st}：《{np.get('name','')}》- {np.get('artist','')}"
+                if qc:
+                    line += f"（播放队列还有 {qc} 首）"
+                parts.append(line)
+            shared = playback.get_shared(limit=5)
+            if shared:
+                names = " / ".join(f"《{s.get('name','')}》- {s.get('artist','')}" for s in shared if s.get("name"))
+                if names:
+                    parts.append(f"【最近一起听过的歌】\n{names}")
+        except Exception:
+            pass
+
     cli_file_text = build_cli_file_storage_text(model_key)
     if cli_file_text:
         parts.append(cli_file_text.strip())
