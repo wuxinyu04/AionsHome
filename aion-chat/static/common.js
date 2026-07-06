@@ -459,7 +459,7 @@ async function _receiveGift(giftId) {
 // 覆盖文件后浏览器会沿用缓存里的旧图。这里给 URL 带上版本号（文件 mtime），
 // WS 收到 avatar_changed 时更新版本号并刷新当前文档所有头像 img；
 // 启动时从后端拉一次版本号，给静态和动态插入的头像都补上版本号。
-const _AVATAR_FILES = { user: 'UserIcon.png', ai: 'AIIcon.png' };
+const _AVATAR_FILES = { user: 'UserIcon.png', ai: 'AIIcon.png', connor: 'codexicon.png' };
 let _avatarVersions = (function () {
   try { return JSON.parse(localStorage.getItem('aion_avatar_versions') || '{}') || {}; }
   catch (e) { return {}; }

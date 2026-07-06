@@ -20,6 +20,7 @@ router = APIRouter(prefix="/api/avatar", tags=["avatar"])
 _AVATAR_FILES = {
     "user": "UserIcon.png",
     "ai": "AIIcon.png",
+    "connor": "codexicon.png",
 }
 
 # PNG 文件头（比 content_type 可靠，content_type 浏览器可能不传或传错）

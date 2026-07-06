@@ -88,11 +88,57 @@ window.addEventListener('storage', (e) => {
 let crWhisperMode = false;
 const crHandledToyEvents = new Set();
 
-const AVATARS = {
-  user: '/public/UserIcon.png',
-  aion: '/public/gropicon1.png',
-  connor: '/public/codexicon.png',
+// ── 头像版本管理（群聊不引入 common.js，自带一份；与 common.js 共享 localStorage）──
+const _CHATROOM_AVATAR_FILES = { user: 'UserIcon.png', ai: 'AIIcon.png', connor: 'codexicon.png' };
+let _chatroomAvatarVersions = (() => {
+  try { return JSON.parse(localStorage.getItem('aion_avatar_versions') || '{}') || {}; }
+  catch (e) { return {}; }
+})();
+window.avatarUrl = function (kind) {
+  const file = _CHATROOM_AVATAR_FILES[kind];
+  if (!file) return `/public/${kind}.png`;
+  const v = _chatroomAvatarVersions[kind];
+  return `/public/${file}` + (v ? `?v=${v}` : '');
 };
+function _chatroomAvatarKeyFromSrc(src) {
+  if (!src) return null;
+  for (const k in _CHATROOM_AVATAR_FILES) { if (src.indexOf(_CHATROOM_AVATAR_FILES[k]) !== -1) return k; }
+  return null;
+}
+function applyAvatars() {
+  const imgs = document.querySelectorAll('img');
+  for (let i = 0; i < imgs.length; i++) {
+    const img = imgs[i];
+    const key = _chatroomAvatarKeyFromSrc(img.getAttribute('src') || '');
+    if (!key) continue;
+    const want = window.avatarUrl(key);
+    if (img.getAttribute('src') !== want) img.src = want;
+  }
+}
+function _refreshChatroomAvatarVersion(kind, version) {
+  if (!_CHATROOM_AVATAR_FILES[kind]) return;
+  _chatroomAvatarVersions[kind] = version;
+  try { localStorage.setItem('aion_avatar_versions', JSON.stringify(_chatroomAvatarVersions)); } catch (e) {}
+  applyAvatars();
+}
+async function _initChatroomAvatarVersions() {
+  try {
+    const res = await fetch('/api/avatar');
+    const d = await res.json();
+    const av = (d && d.avatars) || {};
+    for (const k in _CHATROOM_AVATAR_FILES) { if (av[k] && av[k].version) _chatroomAvatarVersions[k] = av[k].version; }
+    try { localStorage.setItem('aion_avatar_versions', JSON.stringify(_chatroomAvatarVersions)); } catch (e) {}
+    applyAvatars();
+  } catch (e) {}
+}
+_initChatroomAvatarVersions();
+
+// 用户/AI/Connor 头像都走版本号（换头像后实时刷新）
+function crAvatarFor(sender) {
+  if (sender === 'aion') return window.avatarUrl('ai');
+  if (sender === 'connor') return window.avatarUrl('connor');
+  return window.avatarUrl('user');
+}
 
 let crUserName = '我';
 let crAiName = 'AI';
@@ -474,7 +520,7 @@ function crBuildMusicCardHtml(song) {
   const name = esc(song.name || '未知歌曲');
   const artist = esc(song.artist || '未知歌手');
   const songId = song.id;
-  const onlineBtn = `<button class="music-btn secondary" onclick="crPlayMusicOnline(${songId})">▶ 在线播放</button>`;
+  const onlineBtn = `<button class="music-btn secondary" onclick="crPlayMusicOnline(${songId})">▶ 立即播放</button>`;
   return `
     <div class="music-card">
       ${coverImg}
@@ -494,6 +540,17 @@ function crOpenInNetease(songId) {
 }
 
 function crPlayMusicOnline(songId) {
+  // 优先委托给父页（chat）的队列播放器：共享队列，避免双 audio 叠播
+  try {
+    if (window.parent !== window && typeof window.parent.playMusicNow === 'function') {
+      let song = null;
+      for (const mid of Object.keys(crMusicCards || {})) {
+        const f = (crMusicCards[mid] || []).find(s => s && s.id === songId);
+        if (f) { song = f; break; }
+      }
+      if (song) { window.parent.playMusicNow(song); return; }
+    }
+  } catch (e) {}
   let wrap = document.getElementById('crGlobalMusicWrap');
   if (!wrap) {
     wrap = document.createElement('div');
@@ -2485,7 +2542,7 @@ function msgHTML(m) {
   }
 
   const name = crName(sender);
-  const avatar = AVATARS[sender] || AVATARS.user;
+  const avatar = crAvatarFor(sender);
   const time = timeStr(m.created_at);
 
   // 用户消息按单换行拆；AI优先按空行拆，兼容 Gemini CLI 的普通单换行段落。
@@ -2927,7 +2984,7 @@ let pendingStreamId = null;
 function startStreamingBubble(sender, id) {
   streamingText = '';
   const name = crName(sender);
-  const avatar = AVATARS[sender] || AVATARS.user;
+  const avatar = crAvatarFor(sender);
   const senderLine = crMsgSenderLineHtml(sender, name, id, { id, sender }, { tts: false });
 
   // 移除 typing
@@ -2990,7 +3047,7 @@ function endStreamingBubble(messageOrAttachments) {
   if (streamingBubble && streamingText) {
     const sender = streamRow?.classList.contains('connor') ? 'connor' : (streamRow?.classList.contains('aion') ? 'aion' : 'user');
     const name = crName(sender);
-    const avatar = AVATARS[sender] || AVATARS.user;
+    const avatar = crAvatarFor(sender);
     const msgId = streamRow?.id?.startsWith('streaming-') ? streamRow.id.replace('streaming-', '') : '';
     const stack = streamingBubble.closest('.message-stack') || streamingBubble.closest('.msg-content');
     const items = crMessageContentItems(streamingText, sender === 'user');
@@ -4703,6 +4760,10 @@ function connectWS() {
     try {
       const data = JSON.parse(e.data);
       if (data.type === 'pong') return;
+      if (data.type === 'avatar_changed') {
+        _refreshChatroomAvatarVersion(data.data && data.data.kind, data.data && data.data.version);
+        return;
+      }
 
       if (data.type === 'tts_chunk' && data.data) {
         crEnqueueTTSChunk(data.data.msg_id, data.data.seq, data.data.url, data.data.created_at, data.data.target_client_id);

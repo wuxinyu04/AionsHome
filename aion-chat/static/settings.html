@@ -496,7 +496,7 @@ body[data-theme="light"] .avatar-preview {
       <summary>
         <div class="summary-title">
           <strong>🖼 头像</strong>
-          <span>聊天、朋友圈、陪伴阅读等页面的用户与 AI 头像</span>
+          <span>聊天、朋友圈、陪伴阅读等页面的用户、AI 与 Connor 头像</span>
         </div>
         <span class="summary-chevron">›</span>
       </summary>
@@ -516,6 +516,14 @@ body[data-theme="light"] .avatar-preview {
             <div class="avatar-actions">
               <button class="ghost-btn" type="button" onclick="pickAvatar('ai')">更换</button>
               <button class="ghost-btn danger-btn" type="button" onclick="resetAvatar('ai')">重置</button>
+            </div>
+          </div>
+          <div class="avatar-item">
+            <img class="avatar-preview" id="connorAvatarPreview" src="/public/codexicon.png" alt="Connor 头像" onclick="pickAvatar('connor')">
+            <div class="avatar-label">Connor 头像</div>
+            <div class="avatar-actions">
+              <button class="ghost-btn" type="button" onclick="pickAvatar('connor')">更换</button>
+              <button class="ghost-btn danger-btn" type="button" onclick="resetAvatar('connor')">重置</button>
             </div>
           </div>
         </div>
@@ -757,13 +765,15 @@ function pickAvatar(kind) {
 }
 
 function _avatarPreviewId(kind) {
-  return kind === "ai" ? "aiAvatarPreview" : "userAvatarPreview";
+  if (kind === "ai") return "aiAvatarPreview";
+  if (kind === "connor") return "connorAvatarPreview";
+  return "userAvatarPreview";
 }
 
 function _setAvatarPreviewSrc(kind, version) {
   var img = $(_avatarPreviewId(kind));
   if (!img) return;
-  var file = kind === "ai" ? "AIIcon.png" : "UserIcon.png";
+  var file = kind === "ai" ? "AIIcon.png" : (kind === "connor" ? "codexicon.png" : "UserIcon.png");
   img.src = "/public/" + file + (version ? "?v=" + version : "");
 }
 
