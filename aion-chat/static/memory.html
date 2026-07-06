@@ -51,9 +51,13 @@
 .digest-status.info { background:#e3f2fd; color:#1565c0; }
 .digest-status.error { background:#fce4ec; color:#c62828; }
 .digest-runs { margin-top:10px; border:1px solid var(--border); border-radius:8px; background:var(--surface); overflow:hidden; flex-shrink:0; }
-.digest-runs-head { padding:8px 12px; background:var(--surface2); font-size:13px; font-weight:600; color:var(--text); display:flex; justify-content:space-between; align-items:center; }
-.digest-runs-head .refresh { font-size:12px; color:var(--accent); cursor:pointer; font-weight:600; }
+.digest-runs-head { padding:8px 12px; background:var(--surface2); font-size:13px; font-weight:600; color:var(--text); display:flex; justify-content:space-between; align-items:center; cursor:pointer; }
+.digest-runs-head .refresh { font-size:12px; color:var(--accent); cursor:pointer; font-weight:600; margin-right:8px; }
+.run-count-badge { display:inline-block; background:var(--accent); color:#fff; border-radius:999px; padding:0 7px; font-size:11px; margin-left:6px; font-weight:600; }
+.run-count-badge.fail { background:#c62828; }
+.run-toggle { font-size:11px; color:var(--text3); }
 .digest-runs-list { max-height:260px; overflow-y:auto; }
+@media (max-width:600px){ .digest-runs-list { max-height:200px; } }
 .digest-run-row { padding:7px 12px; border-top:1px solid var(--border); font-size:12px; line-height:1.5; color:var(--text2); }
 .digest-run-row:first-child { border-top:none; }
 .run-badge { display:inline-block; padding:1px 6px; border-radius:3px; font-size:11px; margin-right:6px; font-weight:600; }
@@ -180,11 +184,11 @@
       <button class="btn-digest" id="rebuildBtn" onclick="rebuildEmbeddings()" style="background:#1565c0">🔄 重建向量索引</button>
     </div>
     <div class="digest-runs" id="digestRunsPanel" style="display:none">
-      <div class="digest-runs-head">
-        <span>📋 总结运行记录</span>
-        <span class="refresh" onclick="loadDigestRuns()">刷新</span>
+      <div class="digest-runs-head" onclick="toggleDigestRuns()">
+        <span>📋 总结运行记录<span id="digestRunsCount" class="run-count-badge"></span></span>
+        <span><span class="refresh" onclick="event.stopPropagation();loadDigestRuns()">刷新</span><span id="digestRunsToggle" class="run-toggle">▸</span></span>
       </div>
-      <div class="digest-runs-list" id="digestRunsList"></div>
+      <div class="digest-runs-list" id="digestRunsList" style="display:none"></div>
     </div>
     <div class="compress-review" id="compressReview" style="display:none"></div>
   </div>
@@ -493,8 +497,12 @@ async function loadDigestRuns() {
     const runs = res.runs || [];
     const panel = $("digestRunsPanel");
     const list = $("digestRunsList");
+    const countEl = $("digestRunsCount");
     if (!runs.length) { panel.style.display = "none"; return; }
     panel.style.display = "block";
+    const failCount = runs.filter(r => !r.ok || r.diary_ok === false).length;
+    countEl.textContent = failCount > 0 ? `${runs.length} ⚠${failCount}` : `${runs.length}`;
+    countEl.className = "run-count-badge" + (failCount > 0 ? " fail" : "");
     const esc = s => String(s||"").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
     list.innerHTML = runs.map(r => {
       const t = new Date(r.ts * 1000);
@@ -509,6 +517,14 @@ async function loadDigestRuns() {
   } catch(e) {
     console.warn("loadDigestRuns failed", e);
   }
+}
+
+function toggleDigestRuns() {
+  const list = $("digestRunsList");
+  const toggle = $("digestRunsToggle");
+  const open = list.style.display !== "none";
+  list.style.display = open ? "none" : "block";
+  toggle.textContent = open ? "▸" : "▾";
 }
 
 async function compressDailyMemories() {
