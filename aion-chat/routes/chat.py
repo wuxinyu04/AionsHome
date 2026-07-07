@@ -592,6 +592,7 @@ class MsgCreate(BaseModel):
     tts_voice: str = ""
     client_id: str = ""
     theater_session_id: str = ""
+    defer_generation: bool = False
 
 class MsgUpdate(BaseModel):
     content: str
@@ -1357,6 +1358,11 @@ async def send_message(conv_id: str, body: MsgCreate):
             print(f"[WALLET] 用户转账: {t_val}元")
         except (ValueError, Exception):
             pass
+
+    # 连发批量：仅插入用户消息 + 广播 + 转账 + 哨兵重置，不触发生成。
+    # 前端连发 N 条 = 前 N-1 条 defer_generation=True（只插不生成），最后一条 defer_generation=False（正常生成）。
+    if body.defer_generation:
+        return {"ok": True, "msg": user_msg}
 
     async with get_db() as db:
         db.row_factory = __import__('aiosqlite').Row

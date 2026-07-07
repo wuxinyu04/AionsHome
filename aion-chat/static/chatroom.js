@@ -3263,12 +3263,10 @@ function handleSSE(data) {
 
 inputEl.addEventListener('input', resizeInput);
 inputEl.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' && !e.isComposing) {
-    // Shift+Enter 或 Ctrl+Enter 发送，Enter 换行
-    if (e.shiftKey || e.ctrlKey) {
-      e.preventDefault();
-      composer.requestSubmit();
-    }
+  // Enter 发送，Shift+Enter 换行；输入法组词中的回车不拦截（用于选词）
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+    e.preventDefault();
+    composer.requestSubmit();
   }
 });
 

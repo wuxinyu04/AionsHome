@@ -7,6 +7,15 @@ const DEPRECATED_MODEL_PROVIDERS = new Set(["gemini_cli"]);
 let sending = false;
 let streamingAiId = null;
 let _abortController = null;  // 用于中止 AI 生成
+
+// ── 连发队列（像真人聊天：AI 回复期间可继续打字，停顿后合并成一次回复）──
+const BURST_SETTLE_MS = 1500;   // 用户停顿多久算"说完了"，触发合并回复
+const MAX_BURST = 10;           // 队列上限，防失控；到上限立即 flush
+let outbox = [];                // [{tempId, text, attachments, realId}] 本轮待发的用户消息
+let inflight = [];             // 正在 dispatch 的那一批（留着给 WS 替换最后一条 temp 气泡）
+let burstTimer = null;          // 停顿检测计时器
+let burstReady = false;        // 停顿已到，可发送（AI 忙时等 finally 链式触发）
+let _tempIdCounter = 0;        // 临时气泡 id 计数器
 let camCheckMsgId = null;
 let poiSearchMsgId = null;
 let poiSearchCategories = null;
@@ -1368,10 +1377,19 @@ function handleSync(msg) {
         streamingAiId = null;
         renderMessages();
       }
-      // 临时用户消息被真实消息替换
-      else if (currentMessages.find(m => m.id === "temp_user") && data.role === "user") {
-        upsertCurrentMessage(data, { replaceTempUser: true });
-        renderMessages();
+      // 临时用户消息被真实消息替换（连发 temp_u_* 或旧 temp_user）
+      else if (data.role === "user" && _hasPendingTempUserBubble(data.content)) {
+        const entry = inflight.find(o => !o.realId && o.text === data.content) || outbox.find(o => !o.realId && o.text === data.content);
+        if (entry) {
+          const i = currentMessages.findIndex(m => m.id === entry.tempId);
+          if (i >= 0) currentMessages[i] = { ...currentMessages[i], id: data.id, created_at: data.created_at };
+          entry.realId = data.id;
+          if (data.id) serverMessageIds.add(data.id);
+          renderMessages();
+        } else {
+          upsertCurrentMessage(data, { replaceTempUser: true });
+          renderMessages();
+        }
       }
       // 其他端发来的新消息（含 Core 主动发言 / 语音唤醒）
       else if (!currentMessages.find(m => m.id === data.id)) {
@@ -3092,7 +3110,12 @@ function renameCurrent() {
 
 // ── 发送/停止按钮切换 ──
 function handleSendBtn() {
-  if (sending) { stopGeneration(); } else { send(); }
+  // 回复中：输入框有内容 → 发送（进队列）；空 → 停止生成
+  if (sending && !$("input").value.trim() && !pendingAttachments.length) {
+    stopGeneration();
+  } else {
+    onUserSend();
+  }
 }
 
 function _showStopBtn() {
@@ -3110,9 +3133,22 @@ function _showSendBtn() {
 }
 
 function _updateSendBtnState() {
-  if (sending) return;
   const btn = $("sendBtn");
-  btn.disabled = !$("input").value.trim() && !pendingAttachments.length;
+  const hasInput = !!$("input").value.trim() || pendingAttachments.length;
+  if (sending) {
+    // 回复中：有输入 → 发送键（点一下进队列）；空 → 停止键
+    btn.disabled = false;
+    if (hasInput) {
+      btn.classList.remove('stop-mode');
+      btn.innerHTML = '➤';
+    } else {
+      btn.classList.add('stop-mode');
+      btn.innerHTML = '■';
+    }
+  } else {
+    // 非回复中：按输入决定 enabled，图标交给 _showSendBtn 管
+    btn.disabled = !hasInput;
+  }
 }
 
 async function stopGeneration() {
@@ -3127,6 +3163,149 @@ async function stopGeneration() {
 function _getMaxTokens() {
   const v = parseInt($("maxTokensSlider").value) || 0;
   return v > 0 ? v : null;
+}
+
+// ── 连发：队列 + 停顿检测（键盘输入入口）──
+// 用户连发的多条先攒进 outbox（每条立即出乐观气泡），停顿 BURST_SETTLE_MS 后
+// 合并成一次 AI 回复（前 N-1 条只插入不生成，最后一条触发一次生成）。
+// 单条且 AI 空闲时立即发，不引入延迟；AI 回复期间可继续打字发送。
+// 语音路径仍走 send()，不进队列，行为不变。
+async function onUserSend() {
+  const input = $("input");
+  const text = input.value.trim();
+  const attachments = pendingAttachments.slice();
+  if (!text && !attachments.length) return;
+  if (!currentConvId) {
+    await newConversation();
+    if (!currentConvId) return;
+  }
+  // 清空输入区
+  input.value = "";
+  autoResize(input);
+  pendingAttachments = [];
+  renderPreview();
+  _updateSendBtnState();
+
+  // 乐观气泡（每条独立 temp id，便于多气泡各自替换）
+  const tempId = `temp_u_${++_tempIdCounter}`;
+  upsertCurrentMessage({ id: tempId, conv_id: currentConvId, role: "user", content: text, created_at: Date.now()/1000, attachments });
+  renderMessages();
+  playSend();
+  outbox.push({ tempId, text, attachments, realId: null });
+
+  // 单条 + AI 空闲 + 没在排队 → 立即发，跳过 debounce
+  if (!sending && outbox.length === 1 && !burstTimer) {
+    dispatchBurst();
+    return;
+  }
+  // 否则等停顿
+  if (burstTimer) clearTimeout(burstTimer);
+  burstTimer = setTimeout(onBurstSettle, BURST_SETTLE_MS);
+  if (outbox.length >= MAX_BURST) {  // 安全阀：队列过长立即发
+    if (burstTimer) { clearTimeout(burstTimer); burstTimer = null; }
+    burstReady = true;
+    if (!sending) dispatchBurst();
+  }
+}
+
+function onBurstSettle() {
+  burstTimer = null;
+  burstReady = true;
+  if (!sending) dispatchBurst();
+}
+
+async function dispatchBurst() {
+  if (sending) return;  // 上一轮没回完，等它 finally 里链式触发
+  const snapshot = outbox;
+  outbox = [];
+  inflight = snapshot;  // 留着：最后一条的 temp 气泡要靠 WS msg_created 替换
+  burstReady = false;
+  if (burstTimer) { clearTimeout(burstTimer); burstTimer = null; }
+  if (!snapshot.length) return;
+
+  // 读一次本轮发送参数（同轮共用）
+  const contextLimit = parseInt($("contextSlider").value) || 30;
+  const temperature = parseFloat($("tempSlider").value);
+  const maxTokens = _getMaxTokens();
+  const baseOpts = {
+    context_limit: contextLimit, temperature, max_tokens: maxTokens,
+    whisper_mode: whisperMode, tts_enabled: ttsEnabled, tts_voice: ttsVoiceId, client_id: _clientId,
+  };
+
+  sending = true;
+  _showStopBtn();
+  if (ttsEnabled && ttsPlaying) stopLiveTTSQueue();  // 打断上一轮语音（像真人：你一开口对方停嘴）
+  _abortController = new AbortController();
+  try {
+    // 前 N-1 条：只插入用户消息，不触发生成
+    for (let i = 0; i < snapshot.length - 1; i++) {
+      const m = snapshot[i];
+      try {
+        const res = await fetch(`/api/conversations/${currentConvId}/send`, {
+          method: "POST", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({ content: m.text, attachments: m.attachments, defer_generation: true, ...baseOpts }),
+          signal: _abortController.signal,
+        });
+        if (res.ok) {
+          const json = await res.json();
+          if (json && json.msg) _finalizeTempBubble(m.tempId, json.msg);
+        }
+      } catch (err) {
+        if (err.name === 'AbortError') return;
+        console.error("连发插入失败:", err);
+      }
+    }
+    // 最后一条：正常生成
+    const last = snapshot[snapshot.length - 1];
+    const res = await fetch(`/api/conversations/${currentConvId}/send`, {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ content: last.text, attachments: last.attachments, defer_generation: false, ...baseOpts }),
+      signal: _abortController.signal,
+    });
+    await _processSSEStream(res);
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      console.log("用户中止生成");
+    } else {
+      console.error("发送失败:", err);
+      _stopTypingAnim();
+      addErrorToSystemLog(`发送失败: ${err.message || err}`, $("modelSelect")?.value);
+      if (streamingAiId) {
+        const mi = currentMessages.findIndex(m => m.id === streamingAiId);
+        if (mi >= 0 && currentMessages[mi].content === '...') {
+          currentMessages.splice(mi, 1);
+          renderMessages();
+        }
+      }
+    }
+  } finally {
+    sending = false;
+    streamingAiId = null;
+    _abortController = null;
+    _showSendBtn();
+    inflight = [];
+    // 链式：本轮回完，若期间又攒了一轮且已停顿，继续发
+    if (burstReady && outbox.length) dispatchBurst();
+  }
+}
+
+// 用真实消息替换临时气泡（连发时每条用户消息各自一个 temp id）
+function _finalizeTempBubble(tempId, realMsg) {
+  const i = currentMessages.findIndex(m => m.id === tempId);
+  if (i >= 0) {
+    currentMessages[i] = { ...currentMessages[i], id: realMsg.id, created_at: realMsg.created_at };
+    renderMessages();
+  }
+  const e = (inflight.find(o => o.tempId === tempId) || outbox.find(o => o.tempId === tempId));
+  if (e) e.realId = realMsg.id;
+  if (realMsg.id) serverMessageIds.add(realMsg.id);
+}
+
+// 是否有待替换的临时用户气泡（连发 temp_u_* 或旧 temp_user）
+function _hasPendingTempUserBubble(content) {
+  if (inflight.some(o => !o.realId && o.text === content)) return true;
+  if (outbox.some(o => !o.realId && o.text === content)) return true;
+  return !!currentMessages.find(m => m.id === "temp_user");
 }
 
 // ── 发送消息 ──
@@ -3188,6 +3367,8 @@ async function send() {
     streamingAiId = null;
     _abortController = null;
     _showSendBtn();
+    // 链式：语音轮结束后，若期间攒了连发且已停顿，也接着发
+    if (burstReady && outbox.length) dispatchBurst();
   }
 }
 
@@ -3904,7 +4085,13 @@ function handlePoiSearch(categories, msgId) {
 }
 
 // ── UI ──
-function handleKey(e) { if (e.key === "Enter" && e.ctrlKey) { e.preventDefault(); send(); } }
+function handleKey(e) {
+  // Enter 发送，Shift+Enter 换行；输入法组词中的回车不拦截（用于选词）
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+    e.preventDefault();
+    onUserSend();
+  }
+}
 
 function luckinOrderStatusHtml(data) {
   const code = data && data.take_meal_code ? String(data.take_meal_code) : "";
