@@ -284,7 +284,7 @@ async def simple_connor_cli_call(
     else:
         from ai_providers import simple_ai_call
         messages = [{"role": "user", "content": prompt}]
-        full_text = await simple_ai_call(messages, model_key, trace_label=trace_label)
+        full_text = await simple_ai_call(messages, model_key, trace_label=trace_label, max_tokens=16384)
     return full_text.strip() or None
 
 

@@ -527,7 +527,12 @@ async def _call_actor_model(actor: str, messages: list[dict], model_key: str) ->
         if result is None:
             raise RuntimeError("connor model returned empty response")
         return result
-    return await simple_ai_call(messages, model_key, temperature=0.2)
+    result = await simple_ai_call(messages, model_key, temperature=0.2, max_tokens=16384)
+    if not result.strip():
+        raise RuntimeError(
+            "主AI模型返回空响应：GLM 思考链可能过长把 max_tokens 占满、正文被截断。请重试，或临时换非思考模型。"
+        )
+    return result
 
 
 def _extract_json(text: str) -> dict:

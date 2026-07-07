@@ -1229,6 +1229,7 @@ async def _generate_digest_diary(
             diary_messages,
             primary_model,
             trace_label="memory_digest_diary",
+            max_tokens=16384,
         )
         reason = diary_response_error(raw)
         data = None if reason else parse_diary_payload(raw)
@@ -1273,7 +1274,7 @@ async def _digest_summarize_group(ai_messages: list, model_key: str) -> dict | N
             candidates.append(m)
     for mk in candidates:
         try:
-            raw = await simple_ai_call(ai_messages, mk, trace_label="memory_digest_summary", max_tokens=8192)
+            raw = await simple_ai_call(ai_messages, mk, trace_label="memory_digest_summary", max_tokens=16384)
         except Exception as e:
             print(f"[digest] 模型调用失败({mk})，尝试下一个候选: {e}")
             continue
@@ -1636,6 +1637,7 @@ async def _do_digest(min_messages: int = 0, allow_ai_wishes: bool = False) -> di
                     [{"role": "user", "content": prompt}],
                     model_key,
                     trace_label="memory_digest_wish",
+                    max_tokens=16384,
                 )
 
             from wish_pool import maybe_create_ai_digest_wish
@@ -1913,7 +1915,7 @@ async def _call_daily_compress_model(actor: str, prompt: str, model_key: str) ->
         raw = await simple_connor_cli_call(prompt, model_key)
     else:
         from ai_providers import simple_ai_call
-        raw = await simple_ai_call([{"role": "user", "content": prompt}], model_key)
+        raw = await simple_ai_call([{"role": "user", "content": prompt}], model_key, max_tokens=16384)
     parsed = _parse_json_response(raw or "")
     return parsed, raw or ""
 

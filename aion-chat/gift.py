@@ -68,7 +68,7 @@ async def judge_and_send_gift(
                 print("[gift] Connor Codex CLI 无响应")
                 return
         else:
-            raw = await simple_ai_call(messages, model_key)
+            raw = await simple_ai_call(messages, model_key, max_tokens=16384)
         raw = raw.strip()
         # 清理可能的 markdown 代码块
         if raw.startswith("```"):
