@@ -19,10 +19,16 @@ from ai_providers import stream_ai, CLI_STATUS_PREFIX
 from memory import recall_memories, instant_digest, fetch_source_details, build_surfacing_memories, get_embedding, _pack_embedding, _memory_line_with_evidence
 from camera import cam, CAM_CHECK_CMD, perform_cam_check
 from activity import get_activity_summary_for_prompt, get_user_dynamics_for_prompt
+from message_dedup import build_message_dedupe_key, reserve_message_ingress
 from routes.files import export_conversation
 from routes.music import MUSIC_CMD_PATTERN
 from song_gen import SONG_CMD_PATTERN, clean_song_visible_reply
 from tts import TTSStreamer
+from wechat_bridge import (
+    dispatch_wechat_message,
+    process_wechat_outbound_commands,
+    record_wechat_route,
+)
 
 MOMENT_CMD_PATTERN = re.compile(r'\[MOMENT:(.+?)(?:\|(true|false))?\]')
 MEMORY_CMD_PATTERN = re.compile(
@@ -41,7 +47,7 @@ THEATER_STAT_PATTERN = re.compile(r'\[剧场属性[：:]([^\s]+)\s*([+\-＋－]\
 THEATER_ITEM_PATTERN = re.compile(r'\[剧场道具[：:]([^\]]+)\]')
 
 # 允许进入上下文的 system 消息关键词（点歌、查看监控、查看动态）
-_SYSTEM_MSG_CONTEXT_KEYWORDS = ('查看了监控', '搜索了', '点歌', '点了一首', '推荐了', '查看了动态', '视频通话')
+_SYSTEM_MSG_CONTEXT_KEYWORDS = ('查看了监控', '搜索了', '点歌', '点了一首', '推荐了', '查看了动态', '视频通话', '本条为微信消息')
 from context_builder import (
     fetch_merged_timeline, render_merged_timeline, build_health_summary,
     build_ability_block, WISH_CMD_PATTERN, _build_recall_query, strip_tool_commands,
@@ -57,6 +63,15 @@ from luckin import (
     handle_luckin_commands,
     luckin_payment_attachments,
     query_luckin_order_detail,
+)
+from link_preview import build_link_preview_attachments
+from web_search import (
+    WEB_EXTRACT_CMD_PATTERN,
+    WEB_SEARCH_CMD_PATTERN,
+    WebCommandStreamFilter,
+    clean_web_command_text,
+    format_web_system_message,
+    run_web_commands,
 )
 
 
@@ -174,6 +189,20 @@ def _chat_stream_event(model_key: str, full_text: str, chunk: str) -> dict[str, 
     return {"type": "chunk", "content": chunk}
 
 
+async def _emit_chat_visible_chunk(
+    _q: asyncio.Queue,
+    model_key: str,
+    visible_text: str,
+    visible_chunk: str,
+    tts_streamer: TTSStreamer | None = None,
+):
+    if not visible_chunk:
+        return
+    await _q.put(_chat_stream_event(model_key, visible_text, visible_chunk))
+    if tts_streamer:
+        tts_streamer.feed(visible_chunk)
+
+
 _AI_ERROR_PREFIXES = (
     "[Gemini错误",
     "[AntigravityCLI错误",
@@ -202,6 +231,27 @@ def _conversation_dict(row) -> dict:
     data = dict(row)
     data["model"] = resolve_model_key(data.get("model"))
     return data
+
+
+def _decode_message_attachments(raw: Any) -> list:
+    try:
+        return json.loads(raw or "[]") if raw else []
+    except Exception:
+        return []
+
+
+def _message_dict_from_row(row) -> dict:
+    data = dict(row)
+    data["attachments"] = _decode_message_attachments(data.get("attachments"))
+    return data
+
+
+def _done_streaming_response() -> StreamingResponse:
+    async def generate():
+        if False:
+            yield ""
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
 
 
 def _parse_home_args(parts: list[str]) -> dict[str, str]:
@@ -368,6 +418,12 @@ def _dedupe_attachments(items: list) -> list:
         seen.add(key)
         out.append(item)
     return out
+
+
+async def _with_link_previews(content: str, attachments: list | None) -> list:
+    att_list = _dedupe_attachments(list(attachments or []))
+    previews = await build_link_preview_attachments(content, att_list)
+    return _dedupe_attachments(att_list + previews)
 
 def _clean_image_ref(ref: str) -> str:
     ref = (ref or "").strip().strip("<>").strip()
@@ -562,6 +618,39 @@ async def _music_sys_msg(conv_id: str, music_cards: list):
     msg = {"id": msg_id, "conv_id": conv_id, "role": "system",
            "content": text, "created_at": now, "attachments": []}
     await manager.broadcast({"type": "msg_created", "data": msg})
+
+async def _wechat_sys_msg(conv_id: str, text: str, after_msg_id: str = None):
+    """插入微信跨通道系统消息，保留给后续上下文。"""
+    now = time.time()
+    msg_id = f"msg_{time.time_ns()}_wechat"
+    order_atts = [{"type": "system_notice_order", "after_msg_id": after_msg_id}] if after_msg_id else []
+    att_json = json.dumps(order_atts, ensure_ascii=False) if order_atts else "[]"
+    async with get_db() as db:
+        await db.execute(
+            "INSERT INTO messages (id, conv_id, role, content, created_at, attachments) VALUES (?,?,?,?,?,?)",
+            (msg_id, conv_id, "system", text, now, att_json),
+        )
+        await db.commit()
+    msg = {"id": msg_id, "conv_id": conv_id, "role": "system",
+           "content": text, "created_at": now, "attachments": order_atts}
+    await manager.broadcast({"type": "msg_created", "data": msg})
+
+
+async def _process_private_wechat_commands(full_text: str, conv_id: str, ai_msg_id: str) -> str:
+    async def _save_system(system_text: str):
+        await _wechat_sys_msg(conv_id, system_text, after_msg_id=ai_msg_id)
+
+    cleaned, _ = await process_wechat_outbound_commands(
+        full_text,
+        source_type="aion_private",
+        source_id=conv_id,
+        sender="aion",
+        source_msg_id=ai_msg_id,
+        save_system_message=_save_system,
+        send_wechat_message=dispatch_wechat_message,
+        record_route=record_wechat_route,
+    )
+    return cleaned
 
 # ── Pydantic 模型 ─────────────────────────────────
 class ConvCreate(BaseModel):
@@ -984,7 +1073,7 @@ async def edit_resend_message(msg_id: str, body: MsgEditResend):
     history.insert(cap_idx + inject_offset + 1, {"role": "assistant", "content": "收到，我会在合适的时候自然提及。"})
     inject_offset += 2
 
-    if is_search_needed and recall_query:
+    if recall_query:
         recalled = [r for r in debug_top6 if r["score"] >= 0.45 and r["id"] not in surfaced_ids][:5]
         if digest_result.get("require_detail") and recalled:
             detail_text = await fetch_source_details(recalled, recall_keywords)
@@ -1021,6 +1110,8 @@ async def edit_resend_message(msg_id: str, body: MsgEditResend):
 
     async def _bg_generate():
         full_text = ""
+        visible_text = ""
+        web_stream_filter = WebCommandStreamFilter()
         has_error = False
         try:
             await _q.put({"id": ai_msg_id, "type": "start"})
@@ -1030,9 +1121,14 @@ async def edit_resend_message(msg_id: str, body: MsgEditResend):
                         await _q.put({"type": "cli_status", "text": chunk[len(CLI_STATUS_PREFIX):]})
                         continue
                     full_text += chunk
-                    await _q.put(_chat_stream_event(model_key, full_text, chunk))
-                    if tts_streamer:
-                        tts_streamer.feed(chunk)
+                    visible_chunk = web_stream_filter.feed(chunk)
+                    if visible_chunk:
+                        visible_text += visible_chunk
+                        await _emit_chat_visible_chunk(_q, model_key, visible_text, visible_chunk, tts_streamer)
+                visible_tail = web_stream_filter.flush()
+                if visible_tail:
+                    visible_text += visible_tail
+                    await _emit_chat_visible_chunk(_q, model_key, visible_text, visible_tail, tts_streamer)
             except Exception as e:
                 has_error = True
                 error_text = f"\n[请求出错: {str(e)}]"
@@ -1081,6 +1177,11 @@ async def edit_resend_message(msg_id: str, body: MsgEditResend):
                 activity_n = max(1, min(12, activity_n)) if activity_n > 0 else 6
                 full_text = ACTIVITY_CHECK_PATTERN.sub("", full_text).strip()
 
+            web_search_matches = WEB_SEARCH_CMD_PATTERN.findall(full_text)
+            web_extract_matches = WEB_EXTRACT_CMD_PATTERN.findall(full_text)
+            if web_search_matches or web_extract_matches:
+                full_text = clean_web_command_text(full_text)
+
             poi_matches = POI_SEARCH_PATTERN.findall(full_text)
             if poi_matches:
                 full_text = POI_SEARCH_PATTERN.sub("", full_text).strip()
@@ -1108,6 +1209,7 @@ async def edit_resend_message(msg_id: str, body: MsgEditResend):
             full_text = await process_schedule_commands(full_text, conv_id, after_msg_id=ai_msg_id)
             full_text = await _process_home_commands(full_text)
             full_text, luckin_results = await handle_luckin_commands(full_text)
+            full_text = await _process_private_wechat_commands(full_text, conv_id, ai_msg_id)
 
             moment_matches = MOMENT_CMD_PATTERN.findall(full_text)
             if moment_matches:
@@ -1193,6 +1295,7 @@ async def edit_resend_message(msg_id: str, body: MsgEditResend):
             music_atts = [{"type": "music", "name": s["name"], "artist": s["artist"], "id": s["id"]} for s in music_cards] if music_cards else []
             full_text, image_atts = _extract_reply_image_attachments(full_text)
             reply_atts = _dedupe_attachments(music_atts + luckin_payment_attachments(luckin_results) + image_atts)
+            reply_atts = await _with_link_previews(full_text, reply_atts)
             att_json = json.dumps(reply_atts, ensure_ascii=False) if reply_atts else ""
 
             now2 = time.time()
@@ -1228,6 +1331,19 @@ async def edit_resend_message(msg_id: str, body: MsgEditResend):
                 await _q.put(poi_data)
                 await manager.broadcast({"type": "poi_search", "data": poi_data})
                 asyncio.create_task(perform_poi_check(conv_id, model_key, poi_matches))
+
+            if web_search_matches or web_extract_matches:
+                web_data = {
+                    'type': 'web_search',
+                    'conv_id': conv_id,
+                    'searches': web_search_matches,
+                    'extracts': web_extract_matches,
+                    'msg_id': ai_msg_id,
+                }
+                await _q.put(web_data)
+                await manager.broadcast({"type": "web_search", "data": web_data})
+                await _web_search_sys_msg(conv_id, web_search_matches, web_extract_matches, after_msg_id=ai_msg_id)
+                asyncio.create_task(perform_web_search_check(conv_id, model_key, web_search_matches, web_extract_matches))
 
             if activity_n > 0:
                 activity_data = {'type': 'activity_check', 'conv_id': conv_id, 'n': activity_n, 'msg_id': ai_msg_id}
@@ -1311,17 +1427,55 @@ async def send_message(conv_id: str, body: MsgCreate):
     now = time.time()
     msg_id = f"msg_{int(now*1000)}"
 
-    att_json = json.dumps(body.attachments, ensure_ascii=False) if body.attachments else "[]"
+    user_atts = await _with_link_previews(body.content, body.attachments)
+    att_json = json.dumps(user_atts, ensure_ascii=False) if user_atts else "[]"
+    dedupe_key = build_message_dedupe_key(
+        target_type="private",
+        target_id=conv_id,
+        sender="user",
+        content=body.content,
+        attachments=body.attachments,
+    )
+    duplicate_msg = None
     async with get_db() as db:
-        await db.execute(
-            "INSERT INTO messages (id, conv_id, role, content, created_at, attachments) VALUES (?,?,?,?,?,?)",
-            (msg_id, conv_id, "user", body.content, now, att_json)
+        db.row_factory = __import__('aiosqlite').Row
+        duplicate = await reserve_message_ingress(
+            db,
+            dedupe_key=dedupe_key,
+            target_type="private",
+            target_id=conv_id,
+            message_id=msg_id,
+            now=now,
         )
-        await db.execute("UPDATE conversations SET updated_at=? WHERE id=?", (now, conv_id))
+        if duplicate:
+            cur = await db.execute("SELECT * FROM messages WHERE id=?", (duplicate.get("message_id", ""),))
+            row = await cur.fetchone()
+            if row:
+                duplicate_msg = _message_dict_from_row(row)
+            else:
+                await db.execute("DELETE FROM message_ingress_dedupe WHERE dedupe_key=?", (dedupe_key,))
+                duplicate = await reserve_message_ingress(
+                    db,
+                    dedupe_key=dedupe_key,
+                    target_type="private",
+                    target_id=conv_id,
+                    message_id=msg_id,
+                    now=now,
+                )
+        if not duplicate_msg:
+            await db.execute(
+                "INSERT INTO messages (id, conv_id, role, content, created_at, attachments) VALUES (?,?,?,?,?,?)",
+                (msg_id, conv_id, "user", body.content, now, att_json)
+            )
+            await db.execute("UPDATE conversations SET updated_at=? WHERE id=?", (now, conv_id))
         await db.commit()
 
+    if duplicate_msg:
+        await manager.broadcast({"type": "msg_created", "data": duplicate_msg})
+        return _done_streaming_response()
+
     user_msg = {"id": msg_id, "conv_id": conv_id, "role": "user", "content": body.content,
-                "created_at": now, "attachments": body.attachments}
+                "created_at": now, "attachments": user_atts}
     await manager.broadcast({"type": "msg_created", "data": user_msg})
 
     # 用户发消息时重置哨兵巡逻计时器
@@ -1504,7 +1658,7 @@ async def send_message(conv_id: str, body: MsgCreate):
         inject_offset += 2
 
         # 4. RAG 精确召回（与背景记忆去重，使用已并行获取的结果）
-        if is_search_needed and recall_query:
+        if recall_query:
             recalled = [r for r in debug_top6 if r["score"] >= 0.45 and r["id"] not in surfaced_ids][:5]
             # 如果需要补充记忆证据
             if digest_result.get("require_detail") and recalled:
@@ -1547,6 +1701,8 @@ async def send_message(conv_id: str, body: MsgCreate):
     async def _bg_generate():
         """后台任务：AI 流式生成 → 后处理 → 存 DB → WS 广播。始终运行到结束。"""
         full_text = ""
+        visible_text = ""
+        web_stream_filter = WebCommandStreamFilter()
         has_error = False
         try:
             await _q.put({"id": ai_msg_id, "type": "start"})
@@ -1556,9 +1712,14 @@ async def send_message(conv_id: str, body: MsgCreate):
                         await _q.put({"type": "cli_status", "text": chunk[len(CLI_STATUS_PREFIX):]})
                         continue
                     full_text += chunk
-                    await _q.put(_chat_stream_event(model_key, full_text, chunk))
-                    if tts_streamer:
-                        tts_streamer.feed(chunk)
+                    visible_chunk = web_stream_filter.feed(chunk)
+                    if visible_chunk:
+                        visible_text += visible_chunk
+                        await _emit_chat_visible_chunk(_q, model_key, visible_text, visible_chunk, tts_streamer)
+                visible_tail = web_stream_filter.flush()
+                if visible_tail:
+                    visible_text += visible_tail
+                    await _emit_chat_visible_chunk(_q, model_key, visible_text, visible_tail, tts_streamer)
             except Exception as e:
                 has_error = True
                 error_text = f"\n[请求出错: {str(e)}]"
@@ -1613,6 +1774,11 @@ async def send_message(conv_id: str, body: MsgCreate):
                 activity_n = max(1, min(12, activity_n)) if activity_n > 0 else 6
                 full_text = ACTIVITY_CHECK_PATTERN.sub("", full_text).strip()
 
+            web_search_matches = WEB_SEARCH_CMD_PATTERN.findall(full_text)
+            web_extract_matches = WEB_EXTRACT_CMD_PATTERN.findall(full_text)
+            if web_search_matches or web_extract_matches:
+                full_text = clean_web_command_text(full_text)
+
             # 检测 [POI_SEARCH:xxx] 指令 → 标记，后续触发自动搜索+追加回复
             poi_matches = POI_SEARCH_PATTERN.findall(full_text)
             if poi_matches:
@@ -1643,6 +1809,7 @@ async def send_message(conv_id: str, body: MsgCreate):
             full_text = await process_schedule_commands(full_text, conv_id, after_msg_id=ai_msg_id)
             full_text = await _process_home_commands(full_text)
             full_text, luckin_results = await handle_luckin_commands(full_text)
+            full_text = await _process_private_wechat_commands(full_text, conv_id, ai_msg_id)
 
             # 检测 [MOMENT:...] 朋友圈指令
             moment_matches = MOMENT_CMD_PATTERN.findall(full_text)
@@ -1772,6 +1939,7 @@ async def send_message(conv_id: str, body: MsgCreate):
             music_atts = [{"type": "music", "name": s["name"], "artist": s["artist"], "id": s["id"]} for s in music_cards] if music_cards else []
             full_text, image_atts = _extract_reply_image_attachments(full_text)
             reply_atts = _dedupe_attachments(music_atts + luckin_payment_attachments(luckin_results) + image_atts)
+            reply_atts = await _with_link_previews(full_text, reply_atts)
             att_json = json.dumps(reply_atts, ensure_ascii=False) if reply_atts else ""
 
             now2 = time.time()
@@ -1811,6 +1979,19 @@ async def send_message(conv_id: str, body: MsgCreate):
                 await _q.put(poi_data)
                 await manager.broadcast({"type": "poi_search", "data": poi_data})
                 asyncio.create_task(perform_poi_check(conv_id, model_key, poi_matches))
+
+            if web_search_matches or web_extract_matches:
+                web_data = {
+                    'type': 'web_search',
+                    'conv_id': conv_id,
+                    'searches': web_search_matches,
+                    'extracts': web_extract_matches,
+                    'msg_id': ai_msg_id,
+                }
+                await _q.put(web_data)
+                await manager.broadcast({"type": "web_search", "data": web_data})
+                await _web_search_sys_msg(conv_id, web_search_matches, web_extract_matches, after_msg_id=ai_msg_id)
+                asyncio.create_task(perform_web_search_check(conv_id, model_key, web_search_matches, web_extract_matches))
 
             # [查看动态:n] 查看设备活动摘要 → 携带摘要自动追加一轮 Core 回复
             if activity_n > 0:
@@ -2044,6 +2225,147 @@ async def _guarded_cam_check(conv_id: str, model_key: str):
         _cam_check_active.discard(conv_id)
 
 
+async def _web_search_sys_msg(
+    conv_id: str,
+    searches: list[str],
+    extracts: list[str],
+    *,
+    after_msg_id: str | None = None,
+):
+    wb = load_worldbook()
+    ai_name = wb.get("ai_name", "AI")
+    text = format_web_system_message(ai_name, searches, extracts)
+    now = time.time()
+    msg_id = f"msg_{time.time_ns()}_web"
+    order_atts = [{"type": "system_notice_order", "after_msg_id": after_msg_id}] if after_msg_id else []
+    att_json = json.dumps(order_atts, ensure_ascii=False) if order_atts else "[]"
+    async with get_db() as db:
+        await db.execute(
+            "INSERT INTO messages (id, conv_id, role, content, created_at, attachments) VALUES (?,?,?,?,?,?)",
+            (msg_id, conv_id, "system", text, now, att_json),
+        )
+        await db.commit()
+    msg = {"id": msg_id, "conv_id": conv_id, "role": "system", "content": text, "created_at": now, "attachments": order_atts}
+    await manager.broadcast({"type": "msg_created", "data": msg})
+
+
+async def perform_web_search_check(conv_id: str, model_key: str, searches: list[str], extracts: list[str]):
+    if not searches and not extracts:
+        return
+
+    try:
+        context_items = await run_web_commands(searches, extracts)
+        web_context = "\n\n".join(item for item in context_items if item.strip()).strip()
+    except Exception as e:
+        web_context = f"【联网搜索结果】\n系统搜索失败：{e}"
+
+    if not web_context:
+        web_context = "【联网搜索结果】\n系统没有拿到可用结果。"
+
+    wb = load_worldbook()
+    user_name = wb.get("user_name", "用户")
+    ai_name = wb.get("ai_name", "AI")
+
+    prefix = []
+    if wb.get("ai_persona"):
+        prefix.append({"role": "user", "content": f"[系统设定 - {ai_name}人设]\n{wb['ai_persona']}"})
+        prefix.append({"role": "assistant", "content": "收到，我会按照设定扮演角色。"})
+    if wb.get("user_persona"):
+        prefix.append({"role": "user", "content": f"[系统设定 - {user_name}信息]\n{wb['user_persona']}"})
+        prefix.append({"role": "assistant", "content": "收到，我会记住你的信息。"})
+    if wb.get("system_prompt") and wb.get("system_prompt_enabled", True):
+        prefix.append({"role": "user", "content": f"[系统提示]\n{wb['system_prompt']}"})
+        prefix.append({"role": "assistant", "content": "收到，我会遵循这些规则。"})
+
+    import aiosqlite
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT role, content, attachments FROM messages WHERE conv_id=? AND role IN ('user','assistant') ORDER BY created_at DESC LIMIT 6",
+            (conv_id,),
+        )
+        rows = await cur.fetchall()
+    recent = []
+    for r in reversed(rows):
+        _c = r["content"]
+        try:
+            _atts = json.loads(r["attachments"] or "[]") if r["attachments"] else []
+        except Exception:
+            _atts = []
+        for _a in _atts:
+            if isinstance(_a, dict) and _a.get("type") == "voice" and _a.get("transcript"):
+                _orig = _c.strip() if _c else ""
+                _c = f"[语音消息] {_a['transcript']}" + (f"\n{_orig}" if _orig else "")
+            elif isinstance(_a, dict) and _a.get("type") == "video_clip" and _a.get("transcript"):
+                _orig = _c.strip() if _c else ""
+                _c = f"[视频通话] {_a['transcript']}" + (f"\n{_orig}" if _orig else "")
+        recent.append({"role": r["role"], "content": _c, "attachments": []})
+
+    web_prompt = (
+        f"你刚才为了回答{user_name}发起了联网搜索或网页读取，系统已经完成。以下是结果：\n\n"
+        f"{web_context}\n\n"
+        f"请根据这些结果自然回答{user_name}。如果信息不足，请说明不足；不要编造来源。"
+        f"除非确实必须继续核实，否则不要再次输出 [WEB_SEARCH:...] 或 [WEB_EXTRACT:...]。"
+    )
+    messages = prefix + recent + [{"role": "user", "content": web_prompt}]
+
+    msg_id = f"msg_{int(time.time()*1000)}_web_reply"
+    web_tts = None
+    if manager.any_tts_enabled():
+        tts_voice = manager.get_tts_voice()
+        if tts_voice:
+            web_tts = TTSStreamer(msg_id, tts_voice, manager)
+
+    full_text = ""
+    web_reply_filter = WebCommandStreamFilter()
+    try:
+        _temp = SETTINGS.get("temperature")
+        async for chunk in stream_ai(messages, model_key, temperature=_temp):
+            if chunk.startswith(CLI_STATUS_PREFIX):
+                continue
+            full_text += chunk
+            visible_chunk = web_reply_filter.feed(chunk)
+            if web_tts and visible_chunk:
+                web_tts.feed(visible_chunk)
+        visible_tail = web_reply_filter.flush()
+        if web_tts and visible_tail:
+            web_tts.feed(visible_tail)
+    except Exception as e:
+        full_text = f"[联网搜索完成但回复生成失败] {e}"
+
+    if not full_text.strip():
+        return
+
+    from schedule import _process_background_reply_commands
+    full_text = await _process_background_reply_commands(
+        full_text,
+        target={"type": "private"},
+        conv_id=conv_id,
+        sender="aion",
+        ai_msg_id=msg_id,
+    )
+    full_text = _visible_ai_text(clean_web_command_text(full_text))
+
+    now = time.time()
+    async with get_db() as db:
+        await db.execute(
+            "INSERT INTO messages (id, conv_id, role, content, created_at, attachments) VALUES (?,?,?,?,?,?)",
+            (msg_id, conv_id, "assistant", full_text, now, "[]"),
+        )
+        await db.execute("UPDATE conversations SET updated_at=? WHERE id=?", (now, conv_id))
+        await db.commit()
+
+    ai_msg = {"id": msg_id, "conv_id": conv_id, "role": "assistant", "content": full_text, "created_at": now, "attachments": []}
+    await manager.broadcast({"type": "msg_created", "data": ai_msg})
+    if web_tts:
+        try:
+            await web_tts.flush()
+        except Exception:
+            pass
+    await export_conversation(conv_id)
+    print(f"[WEB_SEARCH] 搜索完成，已自动追加回复: searches={len(searches)}, extracts={len(extracts)}")
+
+
 # ── 服务端 POI 搜索 + 自动追加 Core 回复 ─────────
 async def perform_poi_check(conv_id: str, model_key: str, categories: list[str]):
     """Core 主动搜索周边 POI：拿最新坐标 → 搜索 → 携带结果自动追加一轮 Core 回复"""
@@ -2187,6 +2509,15 @@ async def perform_poi_check(conv_id: str, model_key: str, categories: list[str])
     if not full_text.strip():
         return
 
+    from schedule import _process_background_reply_commands
+    full_text = await _process_background_reply_commands(
+        full_text,
+        target={"type": "private"},
+        conv_id=conv_id,
+        sender="aion",
+        ai_msg_id=msg_id,
+    )
+
     # 6. 插入系统提示 + AI 回复
     sys_now = time.time()
     sys_msg_id = f"msg_{int(sys_now*1000)}_poi_sys"
@@ -2317,6 +2648,15 @@ async def perform_activity_check(conv_id: str, model_key: str, n: int = 6):
 
     if not full_text.strip():
         return
+
+    from schedule import _process_background_reply_commands
+    full_text = await _process_background_reply_commands(
+        full_text,
+        target={"type": "private"},
+        conv_id=conv_id,
+        sender="aion",
+        ai_msg_id=msg_id,
+    )
 
     sys_now = time.time()
     sys_msg_id = f"msg_{int(sys_now*1000)}_ac_sys"
@@ -2464,7 +2804,7 @@ async def regenerate_message(conv_id: str, context_limit: int = 30, whisper_mode
         else:
             debug_top6 = []
 
-        if is_search_needed and recall_query:
+        if recall_query:
             recalled = [r for r in debug_top6 if r["score"] >= 0.45 and r["id"] not in surfaced_ids][:5]
             if digest_result.get("require_detail") and recalled:
                 detail_text = await fetch_source_details(recalled, recall_keywords)
@@ -2504,6 +2844,8 @@ async def regenerate_message(conv_id: str, context_limit: int = 30, whisper_mode
     async def _bg_generate():
         """后台任务：AI 流式生成 → 后处理 → 存 DB → WS 广播。始终运行到结束。"""
         full_text = ""
+        visible_text = ""
+        web_stream_filter = WebCommandStreamFilter()
         has_error = False
         try:
             await _q.put({"id": ai_msg_id, "type": "start"})
@@ -2513,9 +2855,14 @@ async def regenerate_message(conv_id: str, context_limit: int = 30, whisper_mode
                         await _q.put({"type": "cli_status", "text": chunk[len(CLI_STATUS_PREFIX):]})
                         continue
                     full_text += chunk
-                    await _q.put(_chat_stream_event(model_key, full_text, chunk))
-                    if regen_tts:
-                        regen_tts.feed(chunk)
+                    visible_chunk = web_stream_filter.feed(chunk)
+                    if visible_chunk:
+                        visible_text += visible_chunk
+                        await _emit_chat_visible_chunk(_q, model_key, visible_text, visible_chunk, regen_tts)
+                visible_tail = web_stream_filter.flush()
+                if visible_tail:
+                    visible_text += visible_tail
+                    await _emit_chat_visible_chunk(_q, model_key, visible_text, visible_tail, regen_tts)
             except Exception as e:
                 has_error = True
                 error_text = f"\n[请求出错: {str(e)}]"
@@ -2570,6 +2917,11 @@ async def regenerate_message(conv_id: str, context_limit: int = 30, whisper_mode
                 activity_n = max(1, min(12, activity_n)) if activity_n > 0 else 6
                 full_text = ACTIVITY_CHECK_PATTERN.sub("", full_text).strip()
 
+            web_search_matches = WEB_SEARCH_CMD_PATTERN.findall(full_text)
+            web_extract_matches = WEB_EXTRACT_CMD_PATTERN.findall(full_text)
+            if web_search_matches or web_extract_matches:
+                full_text = clean_web_command_text(full_text)
+
             # 检测 [POI_SEARCH:xxx] 指令
             poi_matches = POI_SEARCH_PATTERN.findall(full_text)
             if poi_matches:
@@ -2600,6 +2952,7 @@ async def regenerate_message(conv_id: str, context_limit: int = 30, whisper_mode
             full_text = await process_schedule_commands(full_text, conv_id, after_msg_id=ai_msg_id)
             full_text = await _process_home_commands(full_text)
             full_text, luckin_results = await handle_luckin_commands(full_text)
+            full_text = await _process_private_wechat_commands(full_text, conv_id, ai_msg_id)
 
             # 检测 [MOMENT:...] 朋友圈指令
             moment_matches = MOMENT_CMD_PATTERN.findall(full_text)
@@ -2690,6 +3043,7 @@ async def regenerate_message(conv_id: str, context_limit: int = 30, whisper_mode
             music_atts = [{"type": "music", "name": s["name"], "artist": s["artist"], "id": s["id"]} for s in music_cards] if music_cards else []
             full_text, image_atts = _extract_reply_image_attachments(full_text)
             reply_atts = _dedupe_attachments(music_atts + luckin_payment_attachments(luckin_results) + image_atts)
+            reply_atts = await _with_link_previews(full_text, reply_atts)
             att_json = json.dumps(reply_atts, ensure_ascii=False) if reply_atts else ""
 
             now2 = time.time()
@@ -2729,6 +3083,19 @@ async def regenerate_message(conv_id: str, context_limit: int = 30, whisper_mode
                 await _q.put(poi_data)
                 await manager.broadcast({"type": "poi_search", "data": poi_data})
                 asyncio.create_task(perform_poi_check(conv_id, model_key, poi_matches))
+
+            if web_search_matches or web_extract_matches:
+                web_data = {
+                    'type': 'web_search',
+                    'conv_id': conv_id,
+                    'searches': web_search_matches,
+                    'extracts': web_extract_matches,
+                    'msg_id': ai_msg_id,
+                }
+                await _q.put(web_data)
+                await manager.broadcast({"type": "web_search", "data": web_data})
+                await _web_search_sys_msg(conv_id, web_search_matches, web_extract_matches, after_msg_id=ai_msg_id)
+                asyncio.create_task(perform_web_search_check(conv_id, model_key, web_search_matches, web_extract_matches))
 
             # [查看动态:n] 查看设备活动摘要 → 携带摘要自动追加一轮 Core 回复
             if activity_n > 0:

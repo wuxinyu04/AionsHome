@@ -13,6 +13,8 @@ from database import get_db
 from schedule import get_active_schedules, build_schedule_prompt
 from luckin import LUCKIN_CMD_PATTERN
 from song_gen import SONG_CMD_PATTERN
+from wechat_bridge import WECHAT_MESSAGE_PATTERN
+from web_search import WEB_EXTRACT_CMD_PATTERN, WEB_SEARCH_CMD_PATTERN
 from capabilities import (
     build_capability_prompt_items,
     build_cli_file_storage_text,
@@ -50,6 +52,7 @@ _ALL_CMD_PATTERNS = [
     ACTIVITY_CHECK_PATTERN, SELFIE_CMD_PATTERN, DRAW_CMD_PATTERN, SONG_CMD_PATTERN,
     POI_SEARCH_PATTERN, TOY_CMD_PATTERN, PET_CMD_PATTERN,
     HOME_CMD_PATTERN, LUCKIN_CMD_PATTERN, TRANSFER_CMD_PATTERN, PRIVATE_WHISPER_CMD_PATTERN,
+    WECHAT_MESSAGE_PATTERN, WEB_SEARCH_CMD_PATTERN, WEB_EXTRACT_CMD_PATTERN,
 ]
 
 def strip_tool_commands(text: str) -> str:
@@ -382,7 +385,7 @@ async def build_memory_blocks(
         mem_text = "\n".join(unresolved_lines + normal_lines)
         time_block += f"\n\n[背景记忆]\n以下是你记得的近期事件和需要关注的事项，在对话中如果有关联可以自然提起：\n{mem_text}"
 
-    # RAG 摘要召回；always_include_recalled 用于 Connor 侧每轮至少带摘要记忆。
+    # RAG 摘要召回；always_include_recalled 用于需要每轮主动带摘要记忆的上下文。
     recalled = []
     if recall_query and (is_search_needed or always_include_recalled):
         # 主记忆库
@@ -442,7 +445,7 @@ async def build_memory_blocks(
 # ══════════════════════════════════════════════════
 
 # 系统消息过滤关键词（只保留包含这些关键词的系统消息）
-SYSTEM_MSG_CONTEXT_KEYWORDS = ('搜索了', '点歌', '点了一首', '推荐了', '查看了动态', '视频通话', '环境语音', '刚刚完成了约会')
+SYSTEM_MSG_CONTEXT_KEYWORDS = ('搜索了', '点歌', '点了一首', '推荐了', '查看了动态', '视频通话', '环境语音', '刚刚完成了约会', '本条为微信消息')
 
 # 聊天室图片标记 [[image:/uploads/xxx.jpg]] / [[image:/cr-uploads/xxx.jpg]]
 # 这些标记会泄漏文件路径到 LLM 上下文，污染 instant_digest 关键词，

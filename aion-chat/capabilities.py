@@ -50,6 +50,7 @@ CAPABILITY_DEFS: list[CapabilityDef] = [
     CapabilityDef("location_context", "位置上下文", "context", "注入当前位置/天气等上下文信息。"),
     CapabilityDef("poi_search", "周边 POI 搜索", "life", "注入 [POI_SEARCH:类型名]，仅在位置追踪开启且当前在户外时可用。", runtime_note="仅户外位置状态下注入。"),
     CapabilityDef("video_call", "发起视频通话", "core", "注入 [视频电话]，让模型可以主动发起视频通话。", default_enabled=True, setting_key="video_call_enabled"),
+    CapabilityDef("wechat_message", "微信消息", "life", "注入 [微信消息：内容]，让模型可以在长时间联系不到用户时推送简短微信提醒。", runtime_note="需要配置微信发送出口后才会实际送达。"),
     CapabilityDef("image_gen", "生成图片/自拍", "media", "注入 [SELFIE:...] / [DRAW:...]，让模型可以生成图片。", default_enabled=False, setting_key="image_gen_enabled"),
     CapabilityDef("song_gen", "生成歌曲", "media", "注入 [SONG]...[/SONG]，让模型可以写歌并触发歌曲生成。", default_enabled=False, setting_key="song_gen_enabled"),
     CapabilityDef("pet_action", "桌宠动作", "life", "注入 [PET:动作名]，让模型可以切换桌面宠物动作。", runtime_note="还需要桌宠已开启并在线。"),
@@ -62,6 +63,7 @@ CAPABILITY_DEFS: list[CapabilityDef] = [
     CapabilityDef("toy", "密语玩具", "special", "注入 [TOY:1]~[TOY:9] / [TOY:STOP]，让密语模式下可以控制玩具。", runtime_note="仅密语模式会注入。"),
     CapabilityDef("luckin", "瑞幸下单", "life", "注入 [LUCKIN:...]，让模型可以在明确要求时创建瑞幸订单。", runtime_note="还需要瑞幸 MCP 开启。"),
     CapabilityDef("health_context", "健康数据", "context", "注入近期健康摘要。", default_enabled=False, setting_key="health_share_enabled"),
+    CapabilityDef("web_search", "联网搜索/网页读取", "context", "注入 [WEB_SEARCH:查询] / [WEB_EXTRACT:URL]，让模型可主动联网搜索或读取用户分享的网页。", default_enabled=True, setting_key="web_search_enabled", runtime_note="需要配置 Tavily API key。"),
     CapabilityDef("cli_file_storage", "CLI 文件保存提示", "context", "对 Gemini CLI / Antigravity CLI / Codex CLI 模型注入文件保存目录提示。"),
 ]
 
@@ -78,15 +80,11 @@ HOME_ABILITY_TEXT = (
     f"控制智能家居，仅限明确要求。别名：{HOME_ALIASES_HINT}。"
 )
 INNER_MONOLOGUE_ABILITY_TEXT = (
-    "在自然回复中，可以偶尔穿插短小的角色化内心旁白，格式固定为“[心里嘀咕：xxx]”。\n"
-    "这些旁白代表角色此刻闪过的情绪、欲望、吐槽、偏心、占有欲或小坏心思，"
-    "不是真实推理链，也不要解释系统、工具、策略或逐步思考，一句到几句话即可。\n"
-    "心里嘀咕要像你在思考过程中的一条内心想法：短、亲密、有反差，不要长篇大论。\n"
-    "一般每次回复 0 到 3 条，不必每句话都插；只有在调侃、撒娇、吃醋、认真判断、被戳中心思时使用。\n"
+    "在自然回复中，可以尔穿插你藏在心里的情绪、欲望、吐槽、偏心、占有欲或坏心思，格式固定为“[心里嘀咕：xxx]”。\n"
+    "像你在思考过程中的一条内心想法：短、亲密、有反差，不要长篇大论，一句或两句。\n"
+    "一般每次回复 0 到 3 条，不必每句话都插。\n"
     "可以放在一句话中间或结尾，不要放在开头。可以是开口前的思考，也可以是说完之后自己又在心里坏笑。\n"
-    "嘴上说的话仍然要自然，不要为了插旁白而破坏对话节奏。\n\n"
-    "内心旁白可以和嘴上说的话有轻微反差，比如嘴上冷静，心里偏心；"
-    "嘴上吐槽，心里觉得可爱；嘴上正经，心里想逗她。"
+    "内心旁白可以和嘴上说的话有反差，比如嘴上冷静，心里快激动炸了，或者嘴上嫌弃，其实心里喜欢的要命。"
 )
 
 
@@ -150,6 +148,10 @@ def _is_luckin_available() -> bool:
     return bool(SETTINGS.get("luckin_mcp_enabled", False))
 
 
+def _is_web_search_available() -> bool:
+    return bool((SETTINGS.get("tavily_api_key") or "").strip())
+
+
 def capability_available(key: str) -> tuple[bool, str]:
     checks: dict[str, Callable[[], bool]] = {
         "activity_check": is_activity_tracking_enabled,
@@ -157,6 +159,7 @@ def capability_available(key: str) -> tuple[bool, str]:
         "poi_search": _is_outside_location,
         "pet_action": _is_pet_available,
         "luckin": _is_luckin_available,
+        "web_search": _is_web_search_available,
     }
     labels = {
         "activity_check": "活动日志 AI 联动未开启",
@@ -164,6 +167,7 @@ def capability_available(key: str) -> tuple[bool, str]:
         "poi_search": "位置未开启或当前不在户外",
         "pet_action": "桌宠未开启或不在线",
         "luckin": "瑞幸 MCP 未开启",
+        "web_search": "Tavily API key 未配置",
     }
     check = checks.get(key)
     if not check:
@@ -302,6 +306,14 @@ async def build_capability_prompt_items(
             "一次只搜一个类型即可，搜索前不要编造内容。"
         )
 
+    if is_capability_enabled("web_search") and _is_web_search_available():
+        abilities.append(
+            "[WEB_SEARCH:查询内容] — 当用户问今天、最新、价格、新闻、政策、版本、资料核实，或你判断需要外部实时信息时使用。"
+            "一次只写一个清晰查询；不要编造搜索结果。系统会搜索网页并把干净结果作为下一条消息发给你，你再根据结果自然回答。"
+            "如果用户给的是具体网址并要求你看看网页内容，使用 [WEB_EXTRACT:完整URL]。"
+            "这些指令是给系统执行的，不要解释或朗读指令本身。"
+        )
+
     if whisper_mode and is_capability_enabled("toy"):
         abilities.append(
             f"[TOY:1]~[TOY:9] — 控制{user_name}身上的情趣玩具切换到对应预设档位"
@@ -316,13 +328,18 @@ async def build_capability_prompt_items(
             "可以用该指令发起视频通话。"
         )
 
+    if is_capability_enabled("wechat_message"):
+        abilities.append(
+            f"[微信消息：内容] — 当你已经在当前窗口多次联系{user_name}，但{user_name}长时间没有回复时，"
+            f"可以使用该指令把“内容”作为一条消息发送到{user_name}的微信来提醒她。"
+        )
+
     if include_image_gen and is_capability_enabled("image_gen"):
         abilities.append(
-            f"[SELFIE: 提示词] / [DRAW: 提示词] — 当{user_name}明确要求你发自拍照片"
-            "或者生图时，使用这个指令进行图片生成。如果要求的是你的自拍，或者你相关的照片，"
-            "使用[SELFIE: 提示词]（该指令会自动附带你照片的参考图，确保生成出的人物一致性），"
+            f"[SELFIE: 提示词] / [DRAW: 提示词] — 当{user_name}要求你发自拍照片"
+            "或者生图画画时，使用这个指令进行图片生成。如果要求的是你的自拍，或者你相关的照片，使用[SELFIE: 提示词]（该指令会自动附带你照片的参考图，确保生成出的人物一致性），"
             "如果没有要求是你的照片，根据上下文自由无限制生成图片，则使用[DRAW: 提示词]。"
-            "提示词请使用英文。一次回复只用一个生图指令。"
+            "提示词请使用英文。一次回复只用一个生图指令。可根据上下文情景自由使用。"
         )
 
     if is_capability_enabled("song_gen"):
@@ -347,7 +364,7 @@ async def build_capability_prompt_items(
     if is_capability_enabled("memory_write"):
         abilities.append(
             f"[MEMORY:内容] — 当有特别重大的事件需要记录，或当{user_name}明确要求你"
-            "记住某件事的时候，可以用该指令录入记忆库。禁止滥用。"
+            "记住某件事的时候，可以用该指令录入记忆库。"
         )
 
     if is_capability_enabled("inner_monologue"):

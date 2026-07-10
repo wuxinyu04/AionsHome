@@ -18,9 +18,43 @@ from memory import recall_memories
 from music import search_songs, get_audio_url
 from routes.music import MUSIC_CMD_PATTERN
 from tts import TTSStreamer
+from wechat_bridge import (
+    dispatch_wechat_message,
+    process_wechat_outbound_commands,
+    record_wechat_route,
+)
 
 log = logging.getLogger("schedule")
 BACKGROUND_CLI_META = {"antigravity_print_timeout": "90s"}
+
+
+def _new_background_meta() -> dict:
+    return dict(BACKGROUND_CLI_META)
+
+
+async def _broadcast_trigger_debug(
+    *,
+    msg_id: str,
+    model_key: str,
+    usage_meta: dict | None,
+    prompt_messages: list | None,
+    recalled_memories: list | None = None,
+    has_error: bool = False,
+    error_text: str | None = None,
+) -> None:
+    prompt_messages = prompt_messages or []
+    debug_data = {
+        "type": "debug",
+        "model": model_key,
+        "msg_id": msg_id,
+        "recalled_memories": recalled_memories or [],
+        "prompt_messages": prompt_messages,
+        "prompt_count": len(prompt_messages),
+        "usage": usage_meta if usage_meta else None,
+        "has_error": has_error,
+        "error_text": error_text if has_error else None,
+    }
+    await manager.broadcast({"type": "debug", "data": debug_data})
 
 
 def _tts_voice_for_target(is_chatroom: bool, sender: str) -> str:
@@ -191,7 +225,16 @@ class ScheduleManager:
                 return {"type": "chatroom", "room_id": origin_room}
             return {"type": "private"}
 
-    async def _save_to_private(self, conv_id: str, sys_content: str, ai_text: str, ai_msg_id: str, att_json: str, music_atts: list):
+    async def _save_to_private(
+        self,
+        conv_id: str,
+        sys_content: str,
+        ai_text: str,
+        ai_msg_id: str,
+        att_json: str,
+        music_atts: list,
+        reasoning_content: str = "",
+    ):
         """将系统消息和 AI 回复保存到 Aion 私聊"""
         now = time.time()
         sys_msg_id = f"msg_{int(now*1000)}_st"
@@ -208,19 +251,30 @@ class ScheduleManager:
         now2 = time.time()
         async with get_db() as db:
             await db.execute(
-                "INSERT INTO messages (id, conv_id, role, content, created_at, attachments) VALUES (?,?,?,?,?,?)",
-                (ai_msg_id, conv_id, "assistant", ai_text, now2, att_json),
+                "INSERT INTO messages (id, conv_id, role, content, created_at, attachments, reasoning_content) VALUES (?,?,?,?,?,?,?)",
+                (ai_msg_id, conv_id, "assistant", ai_text, now2, att_json, reasoning_content),
             )
             await db.execute("UPDATE conversations SET updated_at=? WHERE id=?", (now2, conv_id))
             await db.commit()
         ai_msg = {"id": ai_msg_id, "conv_id": conv_id, "role": "assistant",
-                  "content": ai_text, "created_at": now2, "attachments": music_atts}
+                  "content": ai_text, "created_at": now2, "attachments": music_atts,
+                  "reasoning_content": reasoning_content}
         await manager.broadcast({"type": "msg_created", "data": ai_msg})
 
         from routes.files import export_conversation
         await export_conversation(conv_id)
 
-    async def _save_to_chatroom(self, room_id: str, sender: str, sys_content: str, ai_text: str, ai_msg_id: str, att_json: str, music_atts: list):
+    async def _save_to_chatroom(
+        self,
+        room_id: str,
+        sender: str,
+        sys_content: str,
+        ai_text: str,
+        ai_msg_id: str,
+        att_json: str,
+        music_atts: list,
+        reasoning_content: str = "",
+    ):
         """将系统消息和 AI 回复保存到聊天室（群聊/Connor 私聊）"""
         now = time.time()
         sys_msg_id = f"cm_{int(now*1000)}_sys"
@@ -237,13 +291,14 @@ class ScheduleManager:
         now2 = time.time()
         async with get_db() as db:
             await db.execute(
-                "INSERT INTO chatroom_messages (id, room_id, sender, content, created_at, attachments) VALUES (?,?,?,?,?,?)",
-                (ai_msg_id, room_id, sender, ai_text, now2, att_json),
+                "INSERT INTO chatroom_messages (id, room_id, sender, content, created_at, attachments, reasoning_content) VALUES (?,?,?,?,?,?,?)",
+                (ai_msg_id, room_id, sender, ai_text, now2, att_json, reasoning_content),
             )
             await db.execute("UPDATE chatroom_rooms SET updated_at=? WHERE id=?", (now2, room_id))
             await db.commit()
         ai_msg = {"id": ai_msg_id, "room_id": room_id, "sender": sender,
-                  "content": ai_text, "created_at": now2, "attachments": music_atts}
+                  "content": ai_text, "created_at": now2, "attachments": music_atts,
+                  "reasoning_content": reasoning_content}
         await manager.broadcast({"type": "chatroom_msg_created", "data": ai_msg})
 
     # ── 触发闹铃 ─────────────────────────────────
@@ -301,6 +356,7 @@ class ScheduleManager:
                 model_key = _cr_model
 
         # 根据来源构建不同的上下文
+        debug_recalled = []
         if origin == "connor" and is_chatroom:
             # Connor 来源 → 用 Connor 的上下文
             from chatroom import build_connor_group_context, build_connor_1v1_context
@@ -336,10 +392,10 @@ class ScheduleManager:
 
             prefix = []
             if wb.get("ai_persona"):
-                prefix.append({"role": "user", "content": f"[系统设定 - AI人设]\n{wb['ai_persona']}"})
+                prefix.append({"role": "user", "content": f"[系统设定 - {ai_name}人设]\n{wb['ai_persona']}"})
                 prefix.append({"role": "assistant", "content": "收到，我会按照设定扮演角色。"})
             if wb.get("user_persona"):
-                prefix.append({"role": "user", "content": f"[系统设定 - 用户信息]\n{wb['user_persona']}"})
+                prefix.append({"role": "user", "content": f"[系统设定 - {user_name}信息]\n{wb['user_persona']}"})
                 prefix.append({"role": "assistant", "content": "收到，我会记住你的信息。"})
 
             now_str = datetime.now().strftime("%Y年%m月%d日  %H:%M:%S")
@@ -370,6 +426,7 @@ class ScheduleManager:
             )
 
             recalled, _ = await recall_memories(trigger_prompt[:300])
+            debug_recalled = recalled
             mem_inject = []
             if recalled:
                 mem_lines = "\n".join([f"- {m['content']}" for m in recalled])
@@ -382,6 +439,9 @@ class ScheduleManager:
 
         # 预生成 ai_msg_id（TTS 分段文件命名需要）
         ai_msg_id = f"msg_{int(time.time()*1000)}_sa"
+        usage_meta = _new_background_meta()
+        debug_model_key = model_key
+        has_error = False
 
         # Connor 来源时根据配置的模型调用
         if origin == "connor":
@@ -389,6 +449,7 @@ class ScheduleManager:
             from ai_providers import CLI_STATUS_PREFIX as _CSP
 
             _connor_model = (_lcc_cr().get("connor_model") or "Codex").strip() or "Codex"
+            debug_model_key = _connor_model
 
             alarm_tts = None
             tts_voice = _tts_voice_for_target(is_chatroom, "connor")
@@ -398,7 +459,7 @@ class ScheduleManager:
             full_text = ""
             try:
                 if _connor_model == "Codex":
-                    async for chunk in stream_connor_cli(messages=messages):
+                    async for chunk in stream_connor_cli(messages=messages, meta=usage_meta):
                         if chunk.startswith(_CSP):
                             continue
                         full_text += chunk
@@ -406,13 +467,14 @@ class ScheduleManager:
                             alarm_tts.feed(chunk)
                 else:
                     _temp = SETTINGS.get("temperature")
-                    async for chunk in stream_ai(messages, _connor_model, meta=BACKGROUND_CLI_META, temperature=_temp):
+                    async for chunk in stream_ai(messages, _connor_model, meta=usage_meta, temperature=_temp):
                         if chunk.startswith(CLI_STATUS_PREFIX):
                             continue
                         full_text += chunk
                         if alarm_tts:
                             alarm_tts.feed(chunk)
             except Exception as e:
+                has_error = True
                 full_text = f"[闹铃提醒回复失败] {e}"
         else:
             # Aion 来源用常规 stream_ai
@@ -424,13 +486,14 @@ class ScheduleManager:
             full_text = ""
             try:
                 _temp = SETTINGS.get("temperature")
-                async for chunk in stream_ai(messages, model_key, meta=BACKGROUND_CLI_META, temperature=_temp):
+                async for chunk in stream_ai(messages, model_key, meta=usage_meta, temperature=_temp):
                     if chunk.startswith(CLI_STATUS_PREFIX):
                         continue
                     full_text += chunk
                     if alarm_tts:
                         alarm_tts.feed(chunk)
             except Exception as e:
+                has_error = True
                 full_text = f"[闹铃提醒回复失败] {e}"
 
         if not full_text.strip():
@@ -458,16 +521,33 @@ class ScheduleManager:
             full_text = await process_schedule_commands(full_text, None, origin=origin, origin_room_id=target["room_id"], after_msg_id=ai_msg_id)
         else:
             full_text = await process_schedule_commands(full_text, conv_id, after_msg_id=ai_msg_id)
+        full_text = await _process_background_reply_commands(
+            full_text,
+            target=target,
+            conv_id=conv_id,
+            sender=sender,
+            ai_msg_id=ai_msg_id,
+        )
 
         music_atts = [{"type": "music", "name": s["name"], "artist": s["artist"], "id": s["id"]} for s in music_cards] if music_cards else []
         att_json = json.dumps(music_atts, ensure_ascii=False) if music_atts else "[]"
+        reasoning_content = (usage_meta.get("reasoning_content") or "").strip()
 
         # ── 保存到目标窗口 ──
         sys_content = f"⏰ 日程闹铃触发：{content}"
         if is_chatroom:
-            await self._save_to_chatroom(target["room_id"], sender, sys_content, full_text, ai_msg_id, att_json, music_atts)
+            await self._save_to_chatroom(target["room_id"], sender, sys_content, full_text, ai_msg_id, att_json, music_atts, reasoning_content)
         else:
-            await self._save_to_private(conv_id, sys_content, full_text, ai_msg_id, att_json, music_atts)
+            await self._save_to_private(conv_id, sys_content, full_text, ai_msg_id, att_json, music_atts, reasoning_content)
+        await _broadcast_trigger_debug(
+            msg_id=ai_msg_id,
+            model_key=debug_model_key,
+            usage_meta=usage_meta,
+            prompt_messages=messages,
+            recalled_memories=debug_recalled,
+            has_error=has_error,
+            error_text=full_text if has_error else None,
+        )
 
         # 刷新 TTS 剩余文本
         if alarm_tts:
@@ -616,10 +696,10 @@ class ScheduleManager:
 
             prefix = []
             if wb.get("ai_persona"):
-                prefix.append({"role": "user", "content": f"[系统设定 - AI人设]\n{wb['ai_persona']}"})
+                prefix.append({"role": "user", "content": f"[系统设定 - {ai_name}人设]\n{wb['ai_persona']}"})
                 prefix.append({"role": "assistant", "content": "收到，我会按照设定扮演角色。"})
             if wb.get("user_persona"):
-                prefix.append({"role": "user", "content": f"[系统设定 - 用户信息]\n{wb['user_persona']}"})
+                prefix.append({"role": "user", "content": f"[系统设定 - {user_name}信息]\n{wb['user_persona']}"})
                 prefix.append({"role": "assistant", "content": "收到，我会记住你的信息。"})
 
             if prefix:
@@ -648,6 +728,9 @@ class ScheduleManager:
 
         # 预生成 ai_msg_id（TTS 分段文件命名需要）
         ai_msg_id = f"msg_{int(time.time()*1000)}_sm"
+        usage_meta = _new_background_meta()
+        debug_model_key = model_key
+        has_error = False
 
         # Connor 来源时根据配置的模型调用
         if origin == "connor":
@@ -655,6 +738,7 @@ class ScheduleManager:
             from ai_providers import CLI_STATUS_PREFIX as _CSP
 
             _connor_model = (_lcc_cr().get("connor_model") or "Codex").strip() or "Codex"
+            debug_model_key = _connor_model
 
             monitor_tts = None
             tts_voice = _tts_voice_for_target(is_chatroom, "connor")
@@ -664,7 +748,7 @@ class ScheduleManager:
             full_text = ""
             try:
                 if _connor_model == "Codex":
-                    async for chunk in stream_connor_cli(messages=messages):
+                    async for chunk in stream_connor_cli(messages=messages, meta=usage_meta):
                         if chunk.startswith(_CSP):
                             continue
                         full_text += chunk
@@ -672,13 +756,14 @@ class ScheduleManager:
                             monitor_tts.feed(chunk)
                 else:
                     _temp = SETTINGS.get("temperature")
-                    async for chunk in stream_ai(messages, _connor_model, meta=BACKGROUND_CLI_META, temperature=_temp):
+                    async for chunk in stream_ai(messages, _connor_model, meta=usage_meta, temperature=_temp):
                         if chunk.startswith(CLI_STATUS_PREFIX):
                             continue
                         full_text += chunk
                         if monitor_tts:
                             monitor_tts.feed(chunk)
             except Exception as e:
+                has_error = True
                 full_text = f"[定时监控回复失败] {e}"
         else:
             monitor_tts = None
@@ -689,13 +774,14 @@ class ScheduleManager:
             full_text = ""
             try:
                 _temp = SETTINGS.get("temperature")
-                async for chunk in stream_ai(messages, model_key, meta=BACKGROUND_CLI_META, temperature=_temp):
+                async for chunk in stream_ai(messages, model_key, meta=usage_meta, temperature=_temp):
                     if chunk.startswith(CLI_STATUS_PREFIX):
                         continue
                     full_text += chunk
                     if monitor_tts:
                         monitor_tts.feed(chunk)
             except Exception as e:
+                has_error = True
                 full_text = f"[定时监控回复失败] {e}"
 
         if not full_text.strip():
@@ -723,9 +809,17 @@ class ScheduleManager:
             full_text = await process_schedule_commands(full_text, None, origin=origin, origin_room_id=target["room_id"], after_msg_id=ai_msg_id)
         else:
             full_text = await process_schedule_commands(full_text, conv_id, after_msg_id=ai_msg_id)
+        full_text = await _process_background_reply_commands(
+            full_text,
+            target=target,
+            conv_id=conv_id,
+            sender=sender,
+            ai_msg_id=ai_msg_id,
+        )
 
         music_atts = [{"type": "music", "name": s["name"], "artist": s["artist"], "id": s["id"]} for s in music_cards] if music_cards else []
         att_json = json.dumps(music_atts, ensure_ascii=False) if music_atts else "[]"
+        reasoning_content = (usage_meta.get("reasoning_content") or "").strip()
 
         # ── 保存到目标窗口 ──
         if origin == "connor":
@@ -735,9 +829,18 @@ class ScheduleManager:
         else:
             sys_content = f"{ai_name}查看了监控"
         if is_chatroom:
-            await self._save_to_chatroom(target["room_id"], sender, sys_content, full_text, ai_msg_id, att_json, music_atts)
+            await self._save_to_chatroom(target["room_id"], sender, sys_content, full_text, ai_msg_id, att_json, music_atts, reasoning_content)
         else:
-            await self._save_to_private(conv_id, sys_content, full_text, ai_msg_id, att_json, music_atts)
+            await self._save_to_private(conv_id, sys_content, full_text, ai_msg_id, att_json, music_atts, reasoning_content)
+        await _broadcast_trigger_debug(
+            msg_id=ai_msg_id,
+            model_key=debug_model_key,
+            usage_meta=usage_meta,
+            prompt_messages=messages,
+            recalled_memories=[],
+            has_error=has_error,
+            error_text=full_text if has_error else None,
+        )
 
         # 刷新 TTS 剩余文本
         if monitor_tts:
@@ -854,6 +957,93 @@ async def _sys_msg(conv_id: str, content: str, after_msg_id: str = None):
     msg = {"id": msg_id, "conv_id": conv_id, "role": "system",
            "content": content, "created_at": now, "attachments": order_atts}
     await manager.broadcast({"type": "msg_created", "data": msg})
+
+
+async def _chatroom_sys_msg(room_id: str, content: str, after_msg_id: str = None):
+    """Insert a chatroom system notice and broadcast it immediately."""
+    now = time.time()
+    msg_id = f"cm_{time.time_ns()}_sys"
+    order_atts = [{"type": "system_notice_order", "after_msg_id": after_msg_id}] if after_msg_id else []
+    att_json = json.dumps(order_atts, ensure_ascii=False) if order_atts else "[]"
+    async with get_db() as db:
+        await db.execute(
+            "INSERT INTO chatroom_messages (id, room_id, sender, content, created_at, attachments) VALUES (?,?,?,?,?,?)",
+            (msg_id, room_id, "system", content, now, att_json),
+        )
+        await db.commit()
+    msg = {"id": msg_id, "room_id": room_id, "sender": "system",
+           "content": content, "created_at": now, "attachments": order_atts}
+    await manager.broadcast({"type": "chatroom_msg_created", "data": msg})
+
+
+async def _process_background_wechat_commands(
+    full_text: str,
+    *,
+    target: dict,
+    conv_id: str | None,
+    sender: str,
+    ai_msg_id: str,
+) -> str:
+    """Run outbound WeChat commands for alarm/monitor generated replies."""
+    if (target or {}).get("type") == "chatroom":
+        room_id = (target or {}).get("room_id") or ""
+        if not room_id:
+            return full_text
+
+        async def _save_chatroom_system(system_text: str):
+            await _chatroom_sys_msg(room_id, system_text, after_msg_id=ai_msg_id)
+
+        cleaned, _ = await process_wechat_outbound_commands(
+            full_text,
+            source_type="chatroom",
+            source_id=room_id,
+            sender=sender,
+            source_msg_id=ai_msg_id,
+            save_system_message=_save_chatroom_system,
+            send_wechat_message=dispatch_wechat_message,
+            record_route=record_wechat_route,
+        )
+        return cleaned
+
+    if not conv_id:
+        return full_text
+
+    async def _save_private_system(system_text: str):
+        await _sys_msg(conv_id, system_text, after_msg_id=ai_msg_id)
+
+    cleaned, _ = await process_wechat_outbound_commands(
+        full_text,
+        source_type="aion_private",
+        source_id=conv_id,
+        sender=sender,
+        source_msg_id=ai_msg_id,
+        save_system_message=_save_private_system,
+        send_wechat_message=dispatch_wechat_message,
+        record_route=record_wechat_route,
+    )
+    return cleaned
+
+
+async def _process_background_reply_commands(
+    full_text: str,
+    *,
+    target: dict,
+    conv_id: str | None,
+    sender: str,
+    ai_msg_id: str,
+) -> str:
+    """Run lightweight shared post-processing for background AI replies."""
+    from routes.chat import _process_home_commands
+
+    cleaned = await _process_home_commands(full_text)
+    cleaned = await _process_background_wechat_commands(
+        cleaned,
+        target=target,
+        conv_id=conv_id,
+        sender=sender,
+        ai_msg_id=ai_msg_id,
+    )
+    return cleaned
 
 
 async def _get_schedule_info(sid: str) -> dict | None:

@@ -18,6 +18,13 @@ public class CachePolicyTest {
     }
 
     @Test
+    public void sharedAssetCacheBypassesVersionedStaticUrls() {
+        assertTrue(SharedAssetCache.hasEncodedQuery("v=system-event-mobile-width"));
+        assertFalse(SharedAssetCache.hasEncodedQuery(""));
+        assertFalse(SharedAssetCache.hasEncodedQuery(null));
+    }
+
+    @Test
     public void mediaPolicyCachesReplayableChatMediaOnly() {
         assertTrue(MediaCacheStore.isCacheablePath("/uploads/voice-message.m4a"));
         assertTrue(MediaCacheStore.isCacheablePath("/cr-uploads/2026-06-21/photo.jpg"));

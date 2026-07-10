@@ -2,6 +2,7 @@
 
 import android.Manifest;
 import android.annotation.SuppressLint;
+import android.content.ActivityNotFoundException;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
@@ -11,6 +12,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.Message;
 import android.os.PowerManager;
 import android.provider.Settings;
 import android.media.projection.MediaProjectionManager;
@@ -254,6 +256,13 @@ public class WebViewActivity extends AppCompatActivity {
             }
         }, "AionImageSaver");
 
+        webView.addJavascriptInterface(new Object() {
+            @JavascriptInterface
+            public void open(String url) {
+                mainHandler.post(() -> handleNewWindowUrl(url));
+            }
+        }, "AionExternal");
+
         // Bounded replay cache controls. The settings page may call these
         // through the top-level WebView bridge without involving the server.
         webView.addJavascriptInterface(new Object() {
@@ -296,6 +305,8 @@ public class WebViewActivity extends AppCompatActivity {
         s.setDatabaseEnabled(true);
         s.setMediaPlaybackRequiresUserGesture(false); // 允许自动播放音频（TTS / 闹铃）
         s.setAllowFileAccess(true);
+        s.setJavaScriptCanOpenWindowsAutomatically(true);
+        s.setSupportMultipleWindows(true);
         // HTTPS/Cloudflare 页面禁止降级加载 HTTP 子资源；纯 HTTP 的 LAN/Tailscale
         // 顶层页面不属于 mixed content，因此两条私网线路不受影响。
         s.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
@@ -334,13 +345,7 @@ public class WebViewActivity extends AppCompatActivity {
                     }
                     return true;
                 }
-                // 站内导航留在 WebView，外部链接用浏览器打开
-                String urlHost = request.getUrl().getHost();
-                if (isAllowedInWebViewHost(urlHost)) {
-                    return false;
-                }
-                startActivity(new Intent(Intent.ACTION_VIEW, request.getUrl()));
-                return true;
+                return handleExternalNavigation(request.getUrl());
             }
 
             @Override
@@ -379,6 +384,7 @@ public class WebViewActivity extends AppCompatActivity {
                         CookieManager.getInstance().flush();
                     }
                     notifyCloudflareAuthReady(url);
+                    runForegroundResumeSync();
                 }
             }
 
@@ -443,6 +449,46 @@ public class WebViewActivity extends AppCompatActivity {
                 return true;
             }
 
+            @Override
+            public boolean onCreateWindow(WebView view, boolean isDialog, boolean isUserGesture,
+                                          Message resultMsg) {
+                WebView.HitTestResult hit = view.getHitTestResult();
+                String hitUrl = hit != null ? hit.getExtra() : null;
+                if (handleNewWindowUrl(hitUrl)) {
+                    return false;
+                }
+
+                WebView popup = new WebView(WebViewActivity.this);
+                popup.setWebViewClient(new WebViewClient() {
+                    @Override
+                    public boolean shouldOverrideUrlLoading(WebView popupView, WebResourceRequest request) {
+                        handleNewWindowUrl(request.getUrl() == null ? null : request.getUrl().toString());
+                        popupView.destroy();
+                        return true;
+                    }
+
+                    @SuppressWarnings("deprecation")
+                    @Override
+                    public boolean shouldOverrideUrlLoading(WebView popupView, String url) {
+                        handleNewWindowUrl(url);
+                        popupView.destroy();
+                        return true;
+                    }
+
+                    @Override
+                    public void onPageStarted(WebView popupView, String url, Bitmap favicon) {
+                        if (handleNewWindowUrl(url)) {
+                            popupView.stopLoading();
+                            popupView.destroy();
+                        }
+                    }
+                });
+                WebView.WebViewTransport transport = (WebView.WebViewTransport) resultMsg.obj;
+                transport.setWebView(popup);
+                resultMsg.sendToTarget();
+                return true;
+            }
+
             // ── 控制台日志（方便调试） ──
             @Override
             public boolean onConsoleMessage(ConsoleMessage msg) {
@@ -478,6 +524,43 @@ public class WebViewActivity extends AppCompatActivity {
     private boolean isAllowedInWebViewHost(String host) {
         return isAionContentHost(host)
                 || isCloudflareAccessHost(host);
+    }
+
+    private boolean handleExternalNavigation(Uri uri) {
+        if (uri == null) return false;
+        if (isAllowedInWebViewHost(uri.getHost())) {
+            return false;
+        }
+        openExternalUrl(uri);
+        return true;
+    }
+
+    private boolean handleNewWindowUrl(String url) {
+        if (url == null || url.trim().isEmpty()) return false;
+        Uri uri;
+        try {
+            uri = Uri.parse(url);
+        } catch (Exception e) {
+            return false;
+        }
+        if (isAllowedInWebViewHost(uri.getHost())) {
+            webView.loadUrl(uri.toString());
+        } else {
+            openExternalUrl(uri);
+        }
+        return true;
+    }
+
+    private void openExternalUrl(Uri uri) {
+        try {
+            Intent intent = new Intent(Intent.ACTION_VIEW, uri);
+            intent.addCategory(Intent.CATEGORY_BROWSABLE);
+            startActivity(intent);
+        } catch (ActivityNotFoundException e) {
+            Toast.makeText(this, "没有可打开此链接的应用", Toast.LENGTH_SHORT).show();
+        } catch (Exception e) {
+            Toast.makeText(this, "无法打开链接", Toast.LENGTH_SHORT).show();
+        }
     }
 
     private boolean isCloudflareAccessHost(String host) {
@@ -740,17 +823,9 @@ public class WebViewActivity extends AppCompatActivity {
         super.onResume();
         // 告诉推送服务：前台已打开，不需要弹通知
         notifyServiceForeground(true);
-        // 回到前台：强制重连 WebSocket + 重新加载当天消息
+        // 回到前台：重连 WebSocket（如需要），并补拉当前会话，避免 WebView 后台冻结漏消息。
         if (webView != null && pageLoaded) {
-            webView.evaluateJavascript(
-                "(function(){" +
-                "  if(typeof ws!=='undefined' && ws.readyState!==1){" +
-                "    console.log('[AionApp] WS断线，重连+刷新');" +
-                "    connectWS();" +
-                "    setTimeout(function(){if(typeof loadMessages==='function')loadMessages();},1500);" +
-                "  }" +
-                "})();",
-                null);
+            webView.evaluateJavascript(ForegroundResumeSyncScript.build(), null);
         }
     }
 
@@ -761,10 +836,17 @@ public class WebViewActivity extends AppCompatActivity {
         notifyServiceForeground(false);
     }
 
+    private void runForegroundResumeSync() {
+        if (webView != null && pageLoaded) {
+            webView.evaluateJavascript(ForegroundResumeSyncScript.build(), null);
+        }
+    }
+
     private void notifyServiceForeground(boolean active) {
         Intent intent = new Intent(this, AionPushService.class);
-        intent.putExtra("action", "set_foreground");
+        intent.putExtra("action", PushServiceStartPolicy.ACTION_SET_FOREGROUND);
         intent.putExtra("active", active);
+        if (targetUrl != null) intent.putExtra("url", targetUrl);
         startService(intent);
     }
 
@@ -777,6 +859,7 @@ public class WebViewActivity extends AppCompatActivity {
             if (!ConnectionEndpoint.hasCloudflareAccessCookie(cookie)) return;
             Intent intent = new Intent(this, AionPushService.class);
             intent.putExtra("action", AionPushService.ACTION_REFRESH_CLOUDFLARE_AUTH);
+            intent.putExtra("url", pageUrl);
             startService(intent);
             sharedAssetCache.refreshManifest(pageUrl, refreshed -> {
                 if (refreshed) {

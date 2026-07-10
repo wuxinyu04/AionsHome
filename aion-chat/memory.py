@@ -9,6 +9,7 @@ import aiosqlite, httpx
 
 from config import get_key, get_sentinel_config, get_embedding_config, load_worldbook, save_chat_status, load_digest_anchor, save_digest_anchor, DEFAULT_MODEL
 from database import get_db
+from model_json import extract_json_object
 from ws import manager
 
 # ── 向量工具 ──────────────────────────────────────
@@ -890,16 +891,7 @@ async def _call_flash_lite(prompt: str) -> dict | None:
 
 def _parse_json_response(raw: str) -> dict | None:
     """从模型输出中提取 JSON 对象"""
-    raw = raw.strip()
-    if "```" in raw:
-        start = raw.find("{")
-        end = raw.rfind("}") + 1
-        if start >= 0 and end > start:
-            raw = raw[start:end]
-    try:
-        return json.loads(raw)
-    except (json.JSONDecodeError, ValueError):
-        return None
+    return extract_json_object(raw)
 
 
 def _normalize_digest_keywords(value, limit: int = 8) -> list[str]:
@@ -1168,28 +1160,26 @@ def _atomic_digest_prompt(
     ignored_text = "、".join(ignored_names) if ignored_names else "高频对话称呼"
     return (
         f"{persona_block}"
-        f"你是{actor_name}，请以自己的视角整理和{user_name}相关的对话记忆。"
-        "这次不是把整段对话压成一条摘要，而是从对话里抽取多条【原子记忆】。\n\n"
-        "你的目标不是尽量少写，而是把未来陪伴、回忆、复盘时真正有用或有味道的事情留下来。\n\n"
+        f"你是{actor_name}，请以自己的视角整理和{user_name}相关的对话记忆。从对话里抽取多条【原子记忆】。\n\n"
         "原子记忆规则：\n"
         "1. content 的第一个字符必须是绝对日期，格式固定为“YYYY-MM-DD，……”。日期来自 source_message_ids 对应原文的发生时间，用公历数字写入正文，作为 embedding 的一部分。\n"
         "2. content 开头必须使用绝对日期。尽量不要在正文里使用“今天、昨天、前天、最近、近期、这几天、前几天、那天、当天、当时、刚才、上周、上个月”等相对时间；如果原文用了相对时间，优先按原文时间换算成绝对日期，换算不清也不要因此丢弃有价值的记忆。\n"
         "3. 一条记忆只记录同一天、同一个可独立召回的事：事实、偏好、计划、关系变化、项目状态、健康/安全信息、阶段性目标，或一次具体生活/互动场景。\n"
         "4. 如果一段对话同时讲了事业、饮食、睡前习惯、关系设定、功能测试、电影评价、某个好玩的梗或小插曲，尽量按日期和事情拆成多条；但不要因为拆分不完美而放弃输出有来源的记忆。\n"
         "5. 保留有信息增量的内容：明确的测试反馈、用户的判断标准、项目推进结论、可复述的有趣场景、重要情绪原因、关系氛围变化、会影响以后陪伴的生活线索。\n"
-        "6. 丢掉普通流水账：常规吃喝睡、买牛奶、体重数字、一次性操作状态、无结论的过程、泛泛的“做了很多事”、无聊的抱怨等等。除非它和健康/金钱/项目/长期习惯/特别有记忆点的场景直接相关。\n"
+        "6. 丢掉普通流水账：常规吃喝睡、一次性操作状态、无结论的过程、泛泛的“做了很多事”、无聊的抱怨等等。除非它和健康/金钱/项目/长期习惯/特别有记忆点的场景直接相关。\n"
         "7. content 写成自然记忆，尽量具体，不要只写“用户讨论了某事”；要写出对象、动作、结论或场景。\n"
         "8. 不要输出解释型来源说明，不要写“这说明了什么”。来源原文由后端按 source_message_ids 读取真实消息。\n"
-        "9. source_message_ids 能引用真实支撑消息时就填 1-8 个；找不到或拿不准时可以留空数组，不要为了凑来源而编造 id。\n"
-        "10. 每 40 条消息通常产出 1-10 条 daily。宁可少写，也不要把普通流水账塞进记忆库。\n\n"
-        "11. unresolved 必须固定输出 false。不要自行标记未完成；如果未来需要，用户会在记忆库里手动开启。\n\n"
+        "9. source_message_ids 能引用真实支撑消息时就填 1-6 个；找不到或拿不准时可以留空数组，不要为了凑来源而编造 id。\n"
+        "10. 每 40 条消息通常产出 1-5 条 daily。宁可少写，也不要把普通流水账塞进记忆库。\n\n"
+        "11. unresolved 必须固定输出 false。不要自行标记未完成。\n\n"
         "type 规则：\n"
         "- daily：有明确日期和对象的普通事件、短期目标、项目进展、具体测试反馈、有趣小事、关系氛围、可帮助自然陪伴的生活线索。普通流水账不要写。\n"
-        "- important：一年后仍会影响回应方式的稳定偏好/雷区、关系或人物事实变化、明确长期承诺、健康安全、重大人生事件、核心价值观变化、长期项目关键决定。门槛很高，宁可不写。\n\n"
-        f"keywords：提取 2-6 个稀缺关键词，必须包含这条记忆的 YYYY-MM-DD 日期关键词；过滤高频人名/称呼（如 {ignored_text}）和泛词（AI、聊天、回复、知道、好的）。\n"
+        "- important：一年后仍会影响回应方式的稳定偏好/雷区、关系或人物事实变化、明确长期承诺、健康安全、重大人生事件、核心价值观变化、长期项目关键决定。门槛很高，宁可不写，严禁滥用。\n\n"
+        f"keywords：提取 1-6 个稀缺关键词，必须包含这条记忆的 YYYY-MM-DD 日期关键词；过滤高频人名/称呼（如 {ignored_text}）和泛词（AI、聊天、回复、知道、好的）。\n"
         "importance：daily 通常 0.25-0.65；important 必须 >=0.75。不要因为情绪强烈就给高分，除非它揭示稳定事实。\n\n"
         "输出的每条 content 也必须以“YYYY-MM-DD，”开头，keywords 必须包含对应的 YYYY-MM-DD 日期关键词；正文里尽量少用今天/昨天/前天/近期/最近等相对时间。\n"
-        "严格只输出 JSON，不要 Markdown，不要解释。格式：\n"
+        "严格只输出 JSON，不要解释，不要说话，不要 Markdown。格式：\n"
         "{\n"
         "  \"memories\": [\n"
         "    {\"content\":\"2026-06-16，一条只描述一件事且带具体对象/场景的记忆\", \"type\":\"daily\", \"keywords\":[\"词\"], \"importance\":0.45, \"unresolved\":false, \"source_message_ids\":[\"private:...或chatroom:...\"]}\n"
@@ -1539,7 +1529,7 @@ async def _do_digest(min_messages: int = 0, allow_ai_wishes: bool = False) -> di
                 f"moment.expect_reply 表示发布朋友圈后是否希望另一个角色主动评论：true=希望对方回复，false=只发布、不触发回复；请根据朋友圈内容和你当下是否想与对方互动自行决定。\n"
                 f"你可以自行决定是否给{user_name}送一份图片小礼物。送礼应是更低概率的特殊事件，只在特殊日子，或聊天中确实有特别温馨、感动、有意义、值得纪念的内容时才送；不要为了完成任务而送礼，也不要用礼物重复日记或朋友圈已经表达的普通感想。\n"
                 f"givegift 为 true 时，gift.image_prompt 填写英文生图提示词，gift.message 填写符合你人设、自然真挚的赠言；为 false 时两项留空。\n\n"
-                f"严格只输出 JSON，不要输出 Markdown，不要解释：\n"
+                f"直接输出JSON，不要解释，不要说话，不要输出 Markdown：\n"
                 f"{{\n"
                 f"  \"diary\": {{\"title\": \"日记标题\", \"content\": \"日记正文\", \"mood\": \"此刻心情\"}},\n"
                 f"  \"post_moment\": false,\n"

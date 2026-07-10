@@ -59,6 +59,7 @@ from routes import persona_evolution as persona_evolution_routes
 from routes import wishes as wishes_routes
 from routes import xhs_lite as xhs_lite_routes
 from routes import capabilities as capabilities_routes
+from routes import wechat as wechat_routes
 from activity import pc_tracker, pc_display_tracker
 from memory import auto_digest
 from chatroom import _connor_1v1_auto_digest_loop
@@ -67,6 +68,7 @@ from autonomy import idle_autonomy_mgr
 from persona_evolution import main_ai_persona_evolution_loop, connor_persona_evolution_loop
 from asset_manifest import get_client_asset_manifest
 from home_assistant_events import ha_event_listener
+from wechat_openclaw_runtime import openclaw_weixin_runtime
 
 
 # ── 自动记忆总结定时任务 ──────────────────────────
@@ -148,7 +150,9 @@ async def lifespan(app: FastAPI):
     connor_persona_evolution_task = asyncio.create_task(connor_persona_evolution_loop())
     idle_autonomy_mgr.start()
     ha_event_listener.start()
+    openclaw_weixin_runtime.start()
     yield
+    await openclaw_weixin_runtime.stop()
     await ha_event_listener.stop()
     idle_autonomy_mgr.stop()
     connor_persona_evolution_task.cancel()
@@ -232,6 +236,7 @@ app.include_router(persona_evolution_routes.router)
 app.include_router(wishes_routes.router)
 app.include_router(xhs_lite_routes.router)
 app.include_router(capabilities_routes.router)
+app.include_router(wechat_routes.router)
 
 
 @app.get("/api/client-assets")

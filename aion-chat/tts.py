@@ -65,6 +65,7 @@ _STRIP_PATTERNS = [
     re.compile(r'\[TOY:[^\]]*\]'),
     re.compile(r'\[MOMENT:[^\]]*\]'),
     re.compile(r'\[MEMORY:[^\]]*\]'),
+    re.compile(r'\[微信消息[：:][^\]]*\]'),
     re.compile(r'\[心里嘀咕\s*[：:]\s*[^\]]*\]'),
     re.compile(r'\[查看动态:\d+\]'),
     re.compile(r'\[SELFIE:[^\]]*\]'),
@@ -78,6 +79,9 @@ _STRIP_PATTERNS = [
 # 句子结束符（用于切分）
 _SENTENCE_ENDS = set('。！？…!?')
 _COMMA_CHARS = set('，,、；;：:')
+
+_SENTENCE_ENDS |= set('.!?')
+_COMMA_CHARS |= set(',;:')
 
 def _strip_tags(text: str) -> str:
     """去除所有特殊标签，只保留纯文本"""
@@ -462,6 +466,7 @@ class TTSStreamer:
                     "msg_id": self.msg_id,
                     "seq": seq,
                     "url": f"{self._audio_url_prefix}/{chunk_name}",
+                    "text": text,
                     "created_at": time.time(),
                 }
             })

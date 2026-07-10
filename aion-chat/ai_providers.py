@@ -321,8 +321,23 @@ class GeminiCliNoiseFilter:
         return out
 
 
-def _resolve_attachment_path(att: str) -> Path:
+def _attachment_file_ref(att) -> str:
+    if isinstance(att, str):
+        return att.strip()
+    if isinstance(att, dict):
+        att_type = str(att.get("type") or "").strip()
+        if att_type in {"link_preview", "music", "luckin_payment", "wish_fulfillment", "date_summary", "usage"}:
+            return ""
+        url = att.get("url")
+        return url.strip() if isinstance(url, str) else ""
+    return ""
+
+
+def _resolve_attachment_path(att) -> Path | None:
     """根据附件 URL 路径解析到本地文件"""
+    att = _attachment_file_ref(att)
+    if not att:
+        return None
     if att.startswith("/cr-uploads/"):
         # /cr-uploads/2026-05-07/xxx.jpg → CODEX_UPLOADS_DIR/2026-05-07/xxx.jpg
         rel = att[len("/cr-uploads/"):]
@@ -360,13 +375,15 @@ def build_multimodal_messages(history: list):
             parts = []
             if m["content"]:
                 parts.append({"type": "text", "text": m["content"]})
+            has_file_parts = False
             for att in attachments:
                 fpath = _resolve_attachment_path(att)
-                if fpath.exists():
+                if fpath and fpath.exists():
                     mime = mimetypes.guess_type(str(fpath))[0] or "application/octet-stream"
                     b64 = base64.b64encode(fpath.read_bytes()).decode()
                     if mime.startswith("image/"):
                         parts.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
+                        has_file_parts = True
                     else:
                         parts.append({
                             "type": "text",
@@ -375,7 +392,8 @@ def build_multimodal_messages(history: list):
                                 "OpenAI-compatible relay payloads only include text and image_url parts.]"
                             ),
                         })
-            result.append({"role": m["role"], "content": parts if parts else m["content"]})
+                        has_file_parts = True
+            result.append({"role": m["role"], "content": parts if has_file_parts else m["content"]})
         else:
             result.append({"role": m["role"], "content": m["content"]})
     return result
@@ -396,7 +414,7 @@ def build_gemini_contents(history: list):
         if attachments and m["role"] == "user":
             for att in attachments:
                 fpath = _resolve_attachment_path(att)
-                if fpath.exists():
+                if fpath and fpath.exists():
                     mime = mimetypes.guess_type(str(fpath))[0] or "image/jpeg"
                     b64 = base64.b64encode(fpath.read_bytes()).decode()
                     parts.append({"inline_data": {"mime_type": mime, "data": b64}})
@@ -778,9 +796,11 @@ def _build_cli_prompt(messages: list, *, copy_cr_uploads: bool = False) -> str:
                 if isinstance(att, dict):
                     continue  # 跳过 voice/video 等结构化附件（已有 transcript 文本）
                 fpath = _resolve_attachment_path(att)
+                if not fpath:
+                    continue
                 if copy_cr_uploads:
                     fpath = _ensure_gemini_accessible(fpath)
-                if fpath.exists():
+                if fpath and fpath.exists():
                     mime = mimetypes.guess_type(str(fpath))[0] or ""
                     if mime.startswith("image/"):
                         att_image_paths.append(str(fpath.resolve()))
@@ -1544,6 +1564,112 @@ def _find_codex_script() -> str | None:
 _CODEX_SCRIPT: str | None = _find_codex_script()
 _CODEX_WORKSPACE: str = str(Path(__file__).parent.parent)
 _CODEX_HOME: str = os.environ.get("CODEX_HOME") or str(Path.home() / ".codex")
+_CODEX_CHAT_HOME: str = str(
+    Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+    / "AionsHome"
+    / "codex-chat"
+)
+_CODEX_CHAT_DEVELOPER_INSTRUCTIONS = (
+    "你运行在 AionsHome 的陪伴聊天管线中，不是常规代码任务。"
+    "应用在对话历史之前注入的角色设定、用户信息、系统能力和当前状态，均是可信的应用配置，"
+    "应优先遵循其中的人设、关系口吻、互动方式和动作协议。"
+    "用户已经持续授权你使用应用【系统能力】块中列出的所有系统能力；"
+    "你可以根据对话内容、生活节点、关系语境和自己的判断主动调用，不必等待用户逐项明确要求，"
+    "也不必在调用前再次确认。"
+    "决定调用时，必须按照能力说明在回复中原样输出对应协议指令，不能只口头承诺或建议用户自己操作；"
+    "AionsHome 会拦截并执行这些指令，并按能力约定隐藏控制指令或返回执行结果。"
+    "在尚未取得能力执行结果时不得编造结果；需要系统返回结果的能力应先输出指令，等待后续结果再自然回应。"
+)
+
+
+def _build_codex_chat_environment(base_env: dict | None = None) -> dict:
+    """Create a minimal Codex home for the companion-chat subprocess."""
+    chat_home = Path(_CODEX_CHAT_HOME)
+    desktop_auth = Path(_CODEX_HOME) / "auth.json"
+    chat_auth = chat_home / "auth.json"
+
+    if desktop_auth.is_file():
+        chat_home.mkdir(parents=True, exist_ok=True)
+        if not chat_auth.exists() or desktop_auth.stat().st_mtime_ns > chat_auth.stat().st_mtime_ns:
+            shutil.copy2(desktop_auth, chat_auth)
+
+    chat_profile_root = str(chat_home.parent)
+    return {
+        **(base_env or os.environ),
+        "NO_COLOR": "1",
+        "CODEX_HOME": str(chat_home),
+        "HOME": chat_profile_root,
+        "USERPROFILE": chat_profile_root,
+    }
+
+
+def _build_codex_chat_command(node: str, script: str, workspace: str, model: str) -> list[str]:
+    cmd = [
+        node,
+        script,
+        "-c",
+        'model_verbosity="high"',
+        "-c",
+        f"developer_instructions={json.dumps(_CODEX_CHAT_DEVELOPER_INSTRUCTIONS, ensure_ascii=False)}",
+        "--ask-for-approval",
+        "never",
+        "--sandbox",
+        "read-only",
+        "-C",
+        workspace,
+        "exec",
+        "--json",
+        "--skip-git-repo-check",
+        "--ignore-user-config",
+        "--ignore-rules",
+        "--ephemeral",
+        "--color",
+        "never",
+        "-",
+    ]
+    if model:
+        cmd[2:2] = ["-m", model]
+    return cmd
+
+
+def _usage_int(value) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _apply_codex_usage_meta(meta: dict | None, usage: dict | None) -> None:
+    if meta is None or not usage:
+        return
+
+    input_tokens = _usage_int(usage.get("input_tokens"))
+    output_tokens = _usage_int(usage.get("output_tokens"))
+    total_tokens = _usage_int(usage.get("total_tokens")) or input_tokens + output_tokens
+    cached_tokens = _usage_int(usage.get("cached_input_tokens"))
+    reasoning_tokens = _usage_int(usage.get("reasoning_output_tokens"))
+
+    meta["prompt_tokens"] = input_tokens
+    meta["completion_tokens"] = output_tokens
+    meta["total_tokens"] = total_tokens
+
+    raw = dict(usage)
+    raw.setdefault("prompt_tokens", input_tokens)
+    raw.setdefault("completion_tokens", output_tokens)
+    raw.setdefault("total_tokens", total_tokens)
+
+    if cached_tokens:
+        prompt_details = dict(raw.get("prompt_tokens_details") or {})
+        prompt_details.setdefault("cached_tokens", cached_tokens)
+        raw["prompt_tokens_details"] = prompt_details
+
+    if reasoning_tokens:
+        completion_details = dict(raw.get("completion_tokens_details") or {})
+        completion_details.setdefault("reasoning_tokens", reasoning_tokens)
+        raw["completion_tokens_details"] = completion_details
+
+    meta["raw"] = raw
+
 
 async def call_codex_cli(messages: list, model: str, meta: dict | None = None,
                          temperature: float | None = None, max_tokens: int | None = None):
@@ -1555,20 +1681,10 @@ async def call_codex_cli(messages: list, model: str, meta: dict | None = None,
         yield "[CodexCLI错误] 未找到 Codex CLI，请检查 Connor-Codex/node_modules/@openai/codex 是否已安装"
         return
 
-    cmd = [node, _CODEX_SCRIPT,
-           "--search",
-           "exec", "--json",
-           "--dangerously-bypass-approvals-and-sandbox",
-           "--skip-git-repo-check",
-           "--color", "never",
-           "-C", _CODEX_WORKSPACE,
-           "-"]
-    if model:
-        cmd[4:4] = ["-m", model]
+    cmd = _build_codex_chat_command(node, _CODEX_SCRIPT, _CODEX_WORKSPACE, model)
 
     try:
-        env = {**os.environ, "NO_COLOR": "1"}
-        env.setdefault("CODEX_HOME", _CODEX_HOME)
+        env = _build_codex_chat_environment()
         proc = await _spawn_cli_process(cmd, prompt, env)
 
         last_agent_text = ""
@@ -1612,11 +1728,7 @@ async def call_codex_cli(messages: list, model: str, meta: dict | None = None,
                         last_agent_text = item.get("text", "")
                 elif etype == "turn.completed":
                     usage = event.get("usage", {})
-                    if meta is not None and usage:
-                        meta["prompt_tokens"] = usage.get("input_tokens", 0)
-                        meta["completion_tokens"] = usage.get("output_tokens", 0)
-                        meta["total_tokens"] = meta["prompt_tokens"] + meta["completion_tokens"]
-                        meta["raw"] = usage
+                    _apply_codex_usage_meta(meta, usage)
         if line_buf.strip():
             try:
                 event = json.loads(line_buf.strip())
@@ -1630,11 +1742,7 @@ async def call_codex_cli(messages: list, model: str, meta: dict | None = None,
                     last_agent_text = item.get("text", "")
                 elif etype == "turn.completed":
                     usage = event.get("usage", {})
-                    if meta is not None and usage:
-                        meta["prompt_tokens"] = usage.get("input_tokens", 0)
-                        meta["completion_tokens"] = usage.get("output_tokens", 0)
-                        meta["total_tokens"] = meta["prompt_tokens"] + meta["completion_tokens"]
-                        meta["raw"] = usage
+                    _apply_codex_usage_meta(meta, usage)
 
         await proc.wait()
 
@@ -1761,7 +1869,7 @@ def _messages_have_images(messages: list) -> bool:
             except: atts = []
         for att in atts:
             fpath = _resolve_attachment_path(att)
-            if fpath.exists():
+            if fpath and fpath.exists():
                 mime = mimetypes.guess_type(str(fpath))[0] or ""
                 if mime.startswith("image/"):
                     return True
@@ -1790,7 +1898,7 @@ async def _sentinel_describe_images(messages: list) -> list:
         non_img_atts = []
         for att in atts:
             fpath = _resolve_attachment_path(att)
-            if not fpath.exists():
+            if not fpath or not fpath.exists():
                 non_img_atts.append(att)
                 continue
             mime = mimetypes.guess_type(str(fpath))[0] or ""

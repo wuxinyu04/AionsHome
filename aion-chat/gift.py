@@ -9,6 +9,7 @@ import httpx, aiosqlite
 
 from config import get_key, UPLOADS_DIR, load_worldbook
 from database import get_db
+from model_json import extract_json_object
 from ws import manager
 
 
@@ -69,7 +70,8 @@ async def judge_and_send_gift(
                 return
         else:
             raw = await simple_ai_call(messages, model_key)
-        raw = raw.strip()
+        result = extract_json_object(raw)
+        raw = str(raw or "").strip()
         # 清理可能的 markdown 代码块
         if raw.startswith("```"):
             raw = raw.split("\n", 1)[-1]
@@ -77,7 +79,8 @@ async def judge_and_send_gift(
                 raw = raw[:-3]
             raw = raw.strip()
 
-        result = json.loads(raw)
+        if result is None:
+            result = json.loads(raw)
     except Exception as e:
         print(f"[gift] AI 判断解析失败: {e}")
         return

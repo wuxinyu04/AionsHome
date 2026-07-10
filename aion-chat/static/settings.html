@@ -455,7 +455,7 @@ body[data-theme="light"] .ghost-btn {
       <summary>
         <div class="summary-title">
           <strong>🔑 API 与基础账号</strong>
-          <span>官方 Key、内置硅基模型、音乐 Cookie</span>
+          <span>官方 Key、联网搜索、内置硅基模型、音乐 Cookie</span>
         </div>
         <span class="summary-chevron">›</span>
       </summary>
@@ -471,6 +471,10 @@ body[data-theme="light"] .ghost-btn {
         <div class="field">
           <label class="form-label">硅基流动 API Key</label>
           <input class="form-input mono-input" type="text" id="sfKeyInput" placeholder="输入硅基流动 API Key..." autocomplete="off">
+        </div>
+        <div class="field">
+          <label class="form-label">Tavily API Key（联网搜索）</label>
+          <input class="form-input mono-input" type="text" id="tavilyApiKeyInput" placeholder="输入 Tavily API Key..." autocomplete="off">
         </div>
         <div class="field full">
           <label class="form-label">网易云 MUSIC_U Cookie（VIP 点歌）</label>
@@ -849,6 +853,7 @@ function collectCustomRoutes() {
   $("embeddingApiKeyInput").value = s.embedding_api_key || "";
   $("embeddingModelInput").value = s.embedding_model || "";
   $("sfKeyInput").value = s.siliconflow_key || "";
+  $("tavilyApiKeyInput").value = s.tavily_api_key || "";
   $("neteaseMusicUInput").value = s.netease_music_u || "";
   $("luckinMcpEnabledInput").checked = !!s.luckin_mcp_enabled;
   $("luckinMcpTokenInput").value = s.luckin_mcp_token || "";
@@ -880,6 +885,7 @@ async function saveSettings() {
     embedding_api_key: $("embeddingApiKeyInput").value.trim(),
     embedding_model: $("embeddingModelInput").value.trim(),
     siliconflow_key: $("sfKeyInput").value.trim(),
+    tavily_api_key: $("tavilyApiKeyInput").value.trim(),
     netease_music_u: $("neteaseMusicUInput").value.trim(),
     luckin_mcp_enabled: $("luckinMcpEnabledInput").checked,
     luckin_mcp_token: $("luckinMcpTokenInput").value.trim(),

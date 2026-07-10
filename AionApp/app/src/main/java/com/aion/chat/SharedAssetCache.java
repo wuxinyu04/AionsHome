@@ -125,6 +125,10 @@ final class SharedAssetCache {
         if (uri == null || activeEntries.isEmpty()) return null;
         String path = uri.getPath();
         if (path == null) return null;
+        // Manifest entries are keyed by path only; versioned URLs such as
+        // /static/chatroom.css?v=... must hit the network instead of an older
+        // persisted object with the same path.
+        if (hasQuery(uri)) return null;
         Entry entry = activeEntries.get(path);
         if (entry == null) return null;
 
@@ -342,6 +346,14 @@ final class SharedAssetCache {
         } catch (Exception e) {
             return null;
         }
+    }
+
+    static boolean hasQuery(Uri uri) {
+        return hasEncodedQuery(uri == null ? null : uri.getEncodedQuery());
+    }
+
+    static boolean hasEncodedQuery(String query) {
+        return query != null && !query.isEmpty();
     }
 
     private static void copyHeader(Map<String, String> headers, Request.Builder builder,
