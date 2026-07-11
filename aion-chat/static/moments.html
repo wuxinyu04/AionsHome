@@ -297,10 +297,13 @@ let pendingMomentAttachments = [];
 
 // ── 初始化 ──
 async function init() {
-  // 获取名字映射
+  // worldbook / chatroom-config 并行；mark-read 是写操作，不阻塞列表加载
+  api('POST', '/api/moments/mark-read').catch(() => {});
   try {
-    const wb = await api('GET', '/api/worldbook');
-    const crCfg = await api('GET', '/api/chatroom/config');
+    const [wb, crCfg] = await Promise.all([
+      api('GET', '/api/worldbook'),
+      api('GET', '/api/chatroom/config'),
+    ]);
     nameMap = {
       user: wb.user_name || '用户',
       aion: wb.ai_name || 'AI',
@@ -309,9 +312,6 @@ async function init() {
   } catch(e) {
     nameMap = { user: '用户', aion: 'AI', connor: 'Connor' };
   }
-
-  // 标记已读
-  try { await api('POST', '/api/moments/mark-read'); } catch(e) {}
 
   loadMoments();
 }

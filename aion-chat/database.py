@@ -3,11 +3,16 @@
 """
 
 import aiosqlite
+from contextlib import asynccontextmanager
 from config import DB_PATH
 
 
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
+        # WAL：读不阻塞写、写不阻塞读，消除「AI 写评论时朋友圈卡 5 秒」的间歇锁等待
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute("PRAGMA synchronous=NORMAL")
+        await db.execute("PRAGMA busy_timeout=5000")
         await db.execute("""
             CREATE TABLE IF NOT EXISTS conversations (
                 id TEXT PRIMARY KEY,
@@ -136,6 +141,21 @@ async def init_db():
                 await db.execute(f"ALTER TABLE schedules ADD COLUMN {col} {defn}")
             except:
                 pass
+        # ── 待办清单表 ──
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS todos (
+                id TEXT PRIMARY KEY,
+                content TEXT NOT NULL,
+                priority TEXT DEFAULT 'normal',
+                category TEXT DEFAULT '',
+                status TEXT DEFAULT 'pending',
+                due_at TEXT DEFAULT '',
+                origin TEXT DEFAULT 'user',
+                created_at REAL NOT NULL,
+                completed_at REAL
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_todos_status ON todos(status, due_at)")
         # ── 心语表（保留兼容，不再写入新数据） ──
         await db.execute("""
             CREATE TABLE IF NOT EXISTS heart_whispers (
@@ -796,5 +816,11 @@ async def init_db():
         await db.commit()
 
 
-def get_db():
-    return aiosqlite.connect(DB_PATH)
+@asynccontextmanager
+async def get_db():
+    async with aiosqlite.connect(DB_PATH) as db:
+        # 每连接：WAL 持久属性 + WAL 下推荐同步级别 + busy 等待上限
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute("PRAGMA synchronous=NORMAL")
+        await db.execute("PRAGMA busy_timeout=5000")
+        yield db

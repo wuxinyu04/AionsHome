@@ -86,11 +86,17 @@ window.addEventListener('storage', e => {
 
 // ── 初始化 ──
 async function init() {
-  models = await api("GET", "/api/models");
-  renderModelSelect();
-  worldBook = await api("GET", "/api/worldbook");
-  try { chatroomConfig = await api("GET", "/api/chatroom/config"); } catch(e) { chatroomConfig = {}; }
-  conversations = await api("GET", "/api/conversations");
+  // 这 4 个请求互相无依赖，并行发省 3 次往返（远程/Tailscale 访问尤其明显）
+  const [md, wb, crCfg, convs] = await Promise.all([
+    api("GET", "/api/models"),
+    api("GET", "/api/worldbook"),
+    api("GET", "/api/chatroom/config").catch(() => ({})),
+    api("GET", "/api/conversations"),
+  ]);
+  models = md; renderModelSelect();
+  worldBook = wb;
+  chatroomConfig = crCfg;
+  conversations = convs;
   const initParams = new URLSearchParams(location.search);
   const targetConvId = initParams.get('conv');
   const targetMsgId = initParams.get('msg');
@@ -3037,27 +3043,25 @@ async function selectConv(id) {
     $("chatTitle").textContent = conv.title;
     $("modelSelect").value = conv.model;
   }
-  setCurrentMessages(await api("GET", `/api/conversations/${id}/messages?limit=${MSG_PAGE_SIZE}`));
-  // 加载该对话的心语数据
-  try {
-    const hwList = await api("GET", `/api/heart-whispers/by-conv/${id}`);
-    for (const hw of hwList) {
-      _heartWhisperMsgIds.add(hw.msg_id);
-      _heartWhisperContent[hw.msg_id] = hw.content;
+  // 消息 / 心语 / 记忆三者互相无依赖，并行加载；renderMessages 前三者都已就绪
+  const [msgs, hwList, mrList] = await Promise.all([
+    api("GET", `/api/conversations/${id}/messages?limit=${MSG_PAGE_SIZE}`),
+    api("GET", `/api/heart-whispers/by-conv/${id}`).catch(e => { console.warn('加载心语失败:', e); return null; }),
+    api("GET", `/api/memories/by-conv/${id}`).catch(e => { console.warn('加载记忆记录失败:', e); return null; }),
+  ]);
+  setCurrentMessages(msgs);
+  if (Array.isArray(hwList)) for (const hw of hwList) {
+    _heartWhisperMsgIds.add(hw.msg_id);
+    _heartWhisperContent[hw.msg_id] = hw.content;
+  }
+  if (Array.isArray(mrList)) for (const mr of mrList) {
+    _memoryRecordMsgIds.add(mr.msg_id);
+    if (_memoryRecordContent[mr.msg_id]) {
+      _memoryRecordContent[mr.msg_id] += '\n' + mr.content;
+    } else {
+      _memoryRecordContent[mr.msg_id] = mr.content;
     }
-  } catch (e) { console.warn('加载心语失败:', e); }
-  // 加载该对话的 AI 主动记忆数据
-  try {
-    const mrList = await api("GET", `/api/memories/by-conv/${id}`);
-    for (const mr of mrList) {
-      _memoryRecordMsgIds.add(mr.msg_id);
-      if (_memoryRecordContent[mr.msg_id]) {
-        _memoryRecordContent[mr.msg_id] += '\n' + mr.content;
-      } else {
-        _memoryRecordContent[mr.msg_id] = mr.content;
-      }
-    }
-  } catch (e) { console.warn('加载记忆记录失败:', e); }
+  }
   hasMoreMessages = currentMessages.length >= MSG_PAGE_SIZE;
   renderConvList();
   renderMessages();
@@ -5161,7 +5165,10 @@ async function fmSave() {
 
 init().then(() => {
   // 初始化完成后自动打开 Home 作为默认页面
-  setTimeout(() => openSubPage('/'), 100);
+  // 用 requestIdleCallback 等聊天页渲染空闲后再开主页，避免主页大资源抢占聊天首屏带宽
+  const openHome = () => openSubPage('/');
+  if ('requestIdleCallback' in window) requestIdleCallback(openHome, { timeout: 1500 });
+  else setTimeout(openHome, 600);
 });
 
 // ── 摄像头/监控日志/记忆库 → 已拆分为独立页面 ──
