@@ -44,6 +44,10 @@ aion-chat/data/key.pem
 aion-chat/data/tmp/
 aion-chat/data/cli_debug/
 aion-chat/data/model_raw_responses/
+aion-chat/data/date_theater_config.json
+aion-chat/data/xhs_lite_config.json
+aion-chat/data/doudizhu_state.json
+aion-chat/data/digest_runs.jsonl
 
 # ── Connor-Codex 用户数据 ──
 Connor-Codex/messages.jsonl
