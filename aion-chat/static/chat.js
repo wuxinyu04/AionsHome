@@ -30,7 +30,7 @@ const _clientId = localStorage.getItem('aion_client_id') || (() => {
   localStorage.setItem('aion_client_id', id); return id;
 })();
 let ws = null;
-let pendingAttachments = [];  // [{url, type, name}]
+let pendingAttachments = [];  // 已上传: {url, type, name}；上传中占位: {uploading:true, localUrl, localId, type}
 let worldBook = { ai_persona: "", user_persona: "", ai_name: "AI", user_name: "你" };
 let msgDebugData = {};  // { msgId: { model, recalled_memories, prompt_messages, prompt_count, usage } }
 let systemLogs = [];    // 系统日志（会话级，刷新清空）
@@ -3395,6 +3395,10 @@ function _getMaxTokens() {
 async function onUserSend() {
   const input = $("input");
   const text = input.value.trim();
+  if (pendingAttachments.some(a => a.uploading)) {
+    showUploadToast('图片还在上传…');
+    return;
+  }
   const attachments = pendingAttachments.slice();
   if (!text && !attachments.length) return;
   if (!currentConvId) {
@@ -3535,6 +3539,11 @@ async function send() {
   const input = $("input");
   const text = input.value.trim();
   if ((!text && !pendingAttachments.length) || sending) return;
+  // 图片还在上传中，先按住别发（避免发出半截消息）
+  if (pendingAttachments.some(a => a.uploading)) {
+    showUploadToast('图片还在上传…');
+    return;
+  }
   // 未选中任何对话时自动新建一个，避免“点发送没反应”
   if (!currentConvId) {
     await newConversation();
@@ -4734,17 +4743,80 @@ function renderAttachments(atts) {
   return html;
 }
 
-async function handleFileSelect(input) {
-  for (const file of input.files) {
-    const fd = new FormData();
-    fd.append('file', file);
-    const res = await fetch('/api/upload', {method:'POST', body: fd});
-    const data = await res.json();
-    if (data.error) { alert(data.error); continue; }
-    pendingAttachments.push(data);
+/* ── 上传显式反馈工具 ── */
+// chat.html 不引入 common.js（自带工具），所以 toast 和上传状态机在这里内联。
+// 占位策略：选完/粘完/拍完立刻 createObjectURL 出 blob: 缩略图，先 push 到
+// pendingAttachments 再 renderPreview，让用户立刻看到反馈；fetch 返回后原地
+// 替换成真实 URL；失败或被用户移除则撤销占位（URL.revokeObjectURL + splice）。
+let _uploadToastTimer = null;
+let _attachSeq = 0;
+function showUploadToast(msg, isError) {
+  let t = document.getElementById('uploadToast');
+  if (!t) {
+    t = document.createElement('div');
+    t.id = 'uploadToast';
+    t.className = 'upload-toast';
+    document.body.appendChild(t);
   }
-  input.value = '';
+  t.textContent = msg;
+  t.classList.toggle('error', !!isError);
+  t.classList.add('show');
+  clearTimeout(_uploadToastTimer);
+  _uploadToastTimer = setTimeout(() => t.classList.remove('show'), 2200);
+}
+function _pushAttachmentPlaceholder(blobOrFile) {
+  const localUrl = URL.createObjectURL(blobOrFile);
+  const localId = 'up_' + (++_attachSeq);
+  pendingAttachments.push({
+    uploading: true,
+    localUrl,
+    localId,
+    type: blobOrFile.type || '',
+  });
   renderPreview();
+  return localId;
+}
+function _findAttachmentIdx(localId) {
+  return pendingAttachments.findIndex(a => a.localId === localId);
+}
+// 上传并原地替换占位；用户中途移除 → findIndex 返回 -1 静默忽略。
+function _uploadAndAttach(blobOrFile, localId, displayName) {
+  const fd = new FormData();
+  const name = displayName || blobOrFile.name || ('upload_' + Date.now());
+  fd.append('file', blobOrFile, name);
+  return fetch('/api/upload', { method: 'POST', body: fd })
+    .then(res => res.json())
+    .then(data => {
+      if (data.error) throw new Error(data.error);
+      const idx = _findAttachmentIdx(localId);
+      if (idx < 0) return; // 用户已点 ✕ 取消
+      const cur = pendingAttachments[idx];
+      if (cur && cur.localUrl) URL.revokeObjectURL(cur.localUrl);
+      pendingAttachments[idx] = data;
+      renderPreview();
+      showUploadToast('✓ 已上传');
+    })
+    .catch(err => {
+      const idx = _findAttachmentIdx(localId);
+      if (idx >= 0) {
+        const cur = pendingAttachments[idx];
+        if (cur && cur.localUrl) URL.revokeObjectURL(cur.localUrl);
+        pendingAttachments.splice(idx, 1);
+        renderPreview();
+      }
+      showUploadToast('上传失败：' + (err.message || '网络错误'), true);
+    });
+}
+
+async function handleFileSelect(input) {
+  const files = Array.from(input.files);
+  input.value = '';
+  // A 方案：仅加显式反馈，不改变网络并发性 → 串行上传。
+  // 占位先 push 再 renderPreview，所以无论上传多慢，用户都立刻能看到缩略图 + spinner。
+  for (const file of files) {
+    const localId = _pushAttachmentPlaceholder(file);
+    await _uploadAndAttach(file, localId);
+  }
 }
 
 // 粘贴图片到输入框
@@ -4758,13 +4830,9 @@ document.addEventListener('DOMContentLoaded', () => {
       e.preventDefault();
       const file = item.getAsFile();
       if (!file) continue;
-      const fd = new FormData();
-      fd.append('file', file);
-      const res = await fetch('/api/upload', {method:'POST', body: fd});
-      const data = await res.json();
-      if (data.error) { alert(data.error); continue; }
-      pendingAttachments.push(data);
-      renderPreview();
+      const localId = _pushAttachmentPlaceholder(file);
+      // 粘贴多张图片不阻塞后续处理；每张独立 toast。
+      _uploadAndAttach(file, localId);
     }
   });
 });
@@ -4774,13 +4842,20 @@ function renderPreview() {
   if (!pendingAttachments.length) { area.className = 'preview-area'; area.innerHTML = ''; return; }
   area.className = 'preview-area has-files';
   area.innerHTML = pendingAttachments.map((a, i) => {
-    const isVid = a.type && a.type.startsWith('video/');
-    const media = isVid ? `<video src="${a.url}" muted></video>` : `<img src="${a.url}">`;
-    return `<div class="preview-item">${media}<button class="preview-remove" onclick="removeAttachment(${i})">✕</button></div>`;
+    const isUploading = !!a.uploading;
+    const url = isUploading ? a.localUrl : a.url;
+    const isVid = (a.type || '').startsWith('video/');
+    const media = isVid
+      ? `<video src="${escHtml(url)}" muted></video>`
+      : `<img src="${escHtml(url)}">`;
+    const spinner = isUploading ? '<div class="preview-spinner"></div>' : '';
+    return `<div class="preview-item${isUploading ? ' uploading' : ''}">${media}${spinner}<button class="preview-remove" onclick="removeAttachment(${i})">✕</button></div>`;
   }).join('');
 }
 
 function removeAttachment(i) {
+  const removed = pendingAttachments[i];
+  if (removed && removed.localUrl) URL.revokeObjectURL(removed.localUrl);
   pendingAttachments.splice(i, 1);
   renderPreview();
 }
@@ -4939,16 +5014,13 @@ async function capturePhoto() {
   }
   if (!dataUrl) { alert('拍照失败'); return; }
   closeCamera();
-  // 转 blob 上传
+  // 转 blob 上传（带占位反馈：立刻显示缩略图 + spinner）
   const resp = await fetch(dataUrl);
   const blob = await resp.blob();
-  const fd = new FormData();
-  fd.append('file', blob, 'photo_' + Date.now() + '.jpg');
-  const res = await fetch('/api/upload', { method: 'POST', body: fd });
-  const data = await res.json();
-  if (data.error) { alert(data.error); return; }
-  pendingAttachments.push(data);
-  renderPreview();
+  const name = 'photo_' + Date.now() + '.jpg';
+  const localId = _pushAttachmentPlaceholder(blob);
+  showUploadToast('已拍照，正在上传…');
+  _uploadAndAttach(blob, localId, name);
 }
 
 // ── 语音消息播放 ──
