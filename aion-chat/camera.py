@@ -1174,7 +1174,12 @@ class CameraMonitor:
             conv_id = conv["id"]
             model_key = conv["model"] or DEFAULT_MODEL
 
-        from schedule import schedule_mgr
+        from schedule import (
+            _broadcast_trigger_debug,
+            _new_background_meta,
+            _process_background_reply_commands,
+            schedule_mgr,
+        )
         target = schedule_mgr._resolve_target({"origin": "aion"})
         is_chatroom = target["type"] == "chatroom"
         if is_chatroom:
@@ -1259,6 +1264,8 @@ class CameraMonitor:
 
         # 预生成 msg_id（TTS 分段文件命名需要）
         core_msg_id = f"msg_{int(time.time()*1000)}_cr"
+        usage_meta = _new_background_meta()
+        has_error = False
 
         # TTS：检查是否有前端开了 TTS
         core_tts = None
@@ -1270,23 +1277,32 @@ class CameraMonitor:
         full_text = ""
         try:
             _temp = SETTINGS.get("temperature")
-            async for chunk in stream_ai(messages, model_key, temperature=_temp):
+            async for chunk in stream_ai(messages, model_key, meta=usage_meta, temperature=_temp):
                 if chunk.startswith(CLI_STATUS_PREFIX):
                     continue
                 full_text += chunk
                 if core_tts:
                     core_tts.feed(chunk)
         except Exception as e:
+            has_error = True
             full_text = f"[Core 回复失败] {e}"
 
         full_text = _strip_leading_cli_role_header(full_text)
         if not full_text.strip():
             return
 
+        full_text = await _process_background_reply_commands(
+            full_text,
+            target=target,
+            conv_id=conv_id,
+            sender="aion",
+            ai_msg_id=core_msg_id,
+        )
+        reasoning_content = (usage_meta.get("reasoning_content") or "").strip()
         sys_content = f"{ai_name}偷偷查看了监控"
         if is_chatroom:
             await schedule_mgr._save_to_chatroom(
-                target["room_id"], "aion", sys_content, full_text, core_msg_id, "[]", []
+                target["room_id"], "aion", sys_content, full_text, core_msg_id, "[]", [], reasoning_content
             )
         else:
             now = time.time()
@@ -1311,19 +1327,29 @@ class CameraMonitor:
             async with get_db() as db:
                 now2 = time.time()
                 await db.execute(
-                    "INSERT INTO messages (id, conv_id, role, content, created_at, attachments) VALUES (?,?,?,?,?,?)",
-                    (core_msg_id, conv_id, "assistant", full_text, now2, "[]")
+                    "INSERT INTO messages (id, conv_id, role, content, created_at, attachments, reasoning_content) VALUES (?,?,?,?,?,?,?)",
+                    (core_msg_id, conv_id, "assistant", full_text, now2, "[]", reasoning_content)
                 )
                 await db.execute("UPDATE conversations SET updated_at=? WHERE id=?", (now2, conv_id))
                 await db.commit()
 
             core_msg = {"id": core_msg_id, "conv_id": conv_id, "role": "assistant",
-                        "content": full_text, "created_at": now2, "attachments": []}
+                        "content": full_text, "created_at": now2, "attachments": [],
+                        "reasoning_content": reasoning_content}
             await manager.broadcast({"type": "msg_created", "data": core_msg})
 
             # 延迟导入避免循环
             from routes.files import export_conversation
             await export_conversation(conv_id)
+        await _broadcast_trigger_debug(
+            msg_id=core_msg_id,
+            model_key=model_key,
+            usage_meta=usage_meta,
+            prompt_messages=messages,
+            recalled_memories=recalled,
+            has_error=has_error,
+            error_text=full_text if has_error else None,
+        )
 
         now = time.time()
         # 刷新 TTS 剩余文本
@@ -1407,6 +1433,9 @@ async def perform_cam_check(conv_id: str, model_key: str):
 
     # 预生成 msg_id（TTS 分段文件命名需要）
     msg_id = f"msg_{int(time.time()*1000)}_cc"
+    from schedule import _broadcast_trigger_debug, _new_background_meta, _process_background_reply_commands
+    usage_meta = _new_background_meta()
+    has_error = False
 
     # TTS：检查是否有前端开了 TTS
     cam_tts = None
@@ -1418,18 +1447,27 @@ async def perform_cam_check(conv_id: str, model_key: str):
     full_text = ""
     try:
         _temp = SETTINGS.get("temperature")
-        async for chunk in stream_ai(messages, model_key, temperature=_temp):
+        async for chunk in stream_ai(messages, model_key, meta=usage_meta, temperature=_temp):
             if chunk.startswith(CLI_STATUS_PREFIX):
                 continue
             full_text += chunk
             if cam_tts:
                 cam_tts.feed(chunk)
     except Exception as e:
+        has_error = True
         full_text = f"[监控查看失败] {e}"
 
     if not full_text.strip():
         return
 
+    full_text = await _process_background_reply_commands(
+        full_text,
+        target={"type": "private"},
+        conv_id=conv_id,
+        sender="aion",
+        ai_msg_id=msg_id,
+    )
+    reasoning_content = (usage_meta.get("reasoning_content") or "").strip()
     # 插入系统提示：查看了监控画面
     sys_now = time.time()
     sys_msg_id = f"msg_{int(sys_now*1000)}_cc_sys"
@@ -1447,15 +1485,25 @@ async def perform_cam_check(conv_id: str, model_key: str):
     now = time.time()
     async with get_db() as db:
         await db.execute(
-            "INSERT INTO messages (id, conv_id, role, content, created_at, attachments) VALUES (?,?,?,?,?,?)",
-            (msg_id, conv_id, "assistant", full_text, now, "[]")
+            "INSERT INTO messages (id, conv_id, role, content, created_at, attachments, reasoning_content) VALUES (?,?,?,?,?,?,?)",
+            (msg_id, conv_id, "assistant", full_text, now, "[]", reasoning_content)
         )
         await db.execute("UPDATE conversations SET updated_at=? WHERE id=?", (now, conv_id))
         await db.commit()
 
     ai_msg = {"id": msg_id, "conv_id": conv_id, "role": "assistant",
-              "content": full_text, "created_at": now, "attachments": []}
+              "content": full_text, "created_at": now, "attachments": [],
+              "reasoning_content": reasoning_content}
     await manager.broadcast({"type": "msg_created", "data": ai_msg})
+    await _broadcast_trigger_debug(
+        msg_id=msg_id,
+        model_key=model_key,
+        usage_meta=usage_meta,
+        prompt_messages=messages,
+        recalled_memories=[],
+        has_error=has_error,
+        error_text=full_text if has_error else None,
+    )
 
     # 刷新 TTS 剩余文本
     if cam_tts:

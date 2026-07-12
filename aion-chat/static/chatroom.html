@@ -11,6 +11,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="theme-color" content="#050923">
 <link rel="stylesheet" href="/static/chatroom.css?v=bubble-font-mobile-14-20260707">
+<link rel="stylesheet" href="/static/voice-call.css?v=voice-call-polish-20260704g">
 </head>
 <body>
   <div class="app">
@@ -87,6 +88,7 @@
           <div class="plus-menu" id="crPlusMenu">
             <div class="plus-menu-item" onclick="crClosePlusMenu();document.getElementById('fileInput').click()"><span class="pm-icon">🖼</span>上传图片</div>
             <div class="plus-menu-item" onclick="crClosePlusMenu();crOpenCamera()"><span class="pm-icon">📷</span>拍照</div>
+            <div class="plus-menu-item" onclick="crClosePlusMenu();if(window.VoiceCall)VoiceCall.openChatroom()"><span class="pm-icon">◉</span>语音通话</div>
             <div class="plus-menu-item" onclick="crClosePlusMenu();crToggleVoiceMode()"><span class="pm-icon">🎤</span>语音消息</div>
             <div class="plus-menu-item" onclick="crClosePlusMenu();crOpenWhisper()"><span class="pm-icon">💗</span>密语时刻</div>
             <div class="plus-menu-item" onclick="crClosePlusMenu();crOpenTransferDialog()"><span class="pm-icon">💰</span>转账</div>
@@ -432,6 +434,7 @@
     </div>
   </div>
 
-  <script src="/static/chatroom.js?v=date-summary-card-20260628"></script>
+  <script src="/static/chatroom.js?v=chatroom-mobile-focus-20260704"></script>
+  <script src="/static/voice-call.js?v=voice-call-polish-20260704g"></script>
 </body>
 </html>

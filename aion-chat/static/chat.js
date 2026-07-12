@@ -221,14 +221,16 @@ function formatMsg(s) {
 
   // 2b. [[image:path]] 图片
   const imgRe = /\[\[image:(\S+?)\]\]/g;
+  // 2b. [[image:path]] 图片 — 使用 upstream 的 imageInteractionAttrs()
   processed = processed.replace(imgRe, (m, url) =>
-    reserve(`<img class="cr-inline-img" src="${escHtml(url)}" onclick="openImageViewer && openImageViewer(this.src)" loading="lazy" style="max-width:100%;border-radius:8px;cursor:pointer;margin:4px 0">`)
+    reserve(`<img class="cr-inline-img" src="${escHtml(url)}" ${imageInteractionAttrs()} loading="lazy" style="max-width:100%;border-radius:8px;cursor:pointer;margin:4px 0">`)
   );
 
-  // 3. MD 渲染（marked 保留 HTML 注释原文，所以占位能活着穿过整篇）
-  let html = window.marked ? marked.parse(processed) : processed.replace(/\n/g, '<br>');
+  // 3. MD 渲染
+  let html = window.marked ? marked.parse(processed) : processed.replace(/
+/g, '<br>');
 
-  // 4. 占位还原成真 HTML
+  // 4. 占位还原
   html = html.replace(/<!--AIONBLOCK(\d+)-->/g, (_, i) => blocks[+i] || '');
 
   // 5. XSS 兜底
@@ -938,6 +940,9 @@ function stopLiveTTSQueue() {
   if (voiceInCall || (typeof videoCall !== 'undefined' && videoCall.active)) {
     notifyVoiceAiSpeaking(false);
   }
+  if (window.VoiceCall && window.VoiceCall.handleTTSEnd) {
+    window.VoiceCall.handleTTSEnd({ surface: "private" });
+  }
 }
 
 function suppressTTSMsg(msgId) {
@@ -1034,9 +1039,87 @@ async function refreshTTSVoices() {
   }
 }
 
-function enqueueTTSChunk(msgId, seq, url, createdAt, targetClientId) {
+function privateVoiceCallSpeakerName() {
+  return (worldBook && worldBook.ai_name) || "AI";
+}
+
+window.PrivateVoiceCallAdapter = {
+  getDefaultSpeakerName() {
+    return privateVoiceCallSpeakerName();
+  },
+  getSpeakerName(sender) {
+    return sender === "user" ? ((worldBook && worldBook.user_name) || "用户") : privateVoiceCallSpeakerName();
+  },
+  speakerForMessage() {
+    return "assistant";
+  },
+  async sendText(text) {
+    const content = String(text || "").trim();
+    if (!content) return;
+    if (!currentConvId) {
+      const conv = await api("POST", "/api/conversations");
+      conversations.unshift(conv);
+      await selectConv(conv.id);
+    }
+    let waited = 0;
+    while (sending && waited < 10000) {
+      await new Promise(resolve => setTimeout(resolve, 200));
+      waited += 200;
+    }
+    if (sending) throw new Error("上一条消息仍在发送");
+
+    const input = $("input");
+    const ttsToggleEl = $("ttsToggle");
+    const previousText = input ? input.value : "";
+    const previousTtsEnabled = ttsEnabled;
+    ttsEnabled = true;
+    if (ttsToggleEl) ttsToggleEl.checked = true;
+    ttsPlaybackActiveAt = Date.now() / 1000;
+    _sendTTSState();
+    if (input) {
+      input.value = content;
+      autoResize(input);
+      _updateSendBtnState();
+    }
+    try {
+      await send();
+    } finally {
+      ttsEnabled = previousTtsEnabled;
+      if (ttsToggleEl) ttsToggleEl.checked = previousTtsEnabled;
+      ttsPlaybackActiveAt = Date.now() / 1000;
+      _sendTTSState();
+      if (input && !sending && input.value === content) {
+        input.value = previousText;
+        autoResize(input);
+        _updateSendBtnState();
+      }
+    }
+  }
+};
+
+function _notifyVoiceCallPrivateTTSStart(msgId, seq, item) {
+  if (!window.VoiceCall || !window.VoiceCall.handleTTSChunkStart) return;
+  window.VoiceCall.handleTTSChunkStart({
+    surface: "private",
+    msgId,
+    seq,
+    url: item?.url || item,
+    text: item?.text || "",
+    sender: "assistant",
+    speakerName: privateVoiceCallSpeakerName()
+  });
+}
+
+function _notifyVoiceCallPrivateTTSEnd() {
+  if (window.VoiceCall && window.VoiceCall.handleTTSEnd) {
+    window.VoiceCall.handleTTSEnd({ surface: "private" });
+  }
+}
+
+function enqueueTTSChunk(msgId, seq, url, createdAt, targetClientId, text = "") {
   const isChatroomTTS = msgId.startsWith('cm_');
-  if (!isChatroomTTS && !ttsEnabled && !(typeof videoCall !== 'undefined' && videoCall.active)) return;
+  const voiceCallActive = !!(window.VoiceCall && window.VoiceCall.isActive && window.VoiceCall.isActive());
+  if (!isChatroomTTS && !ttsEnabled && !voiceCallActive && !(typeof videoCall !== 'undefined' && videoCall.active)) return;
   // 忽略小剧场的 TTS（tm_ 前缀），避免重复播放
   if (msgId.startsWith('tm_')) return;
   if (!shouldAcceptTTSMsg(msgId, createdAt, targetClientId)) return;
@@ -1044,7 +1127,7 @@ function enqueueTTSChunk(msgId, seq, url, createdAt, targetClientId) {
     ttsChunkQueues[msgId] = { nextPlay: 0, chunks: {} };
     ttsPlayOrder.push(msgId);
   }
-  ttsChunkQueues[msgId].chunks[seq] = url;
+  ttsChunkQueues[msgId].chunks[seq] = { url, text: text || "" };
   // 通话中时通知语音模块 AI 开始说话
   if ((voiceInCall || (typeof videoCall !== 'undefined' && videoCall.active)) && !ttsPlaying) {
     notifyVoiceAiSpeaking(true);
@@ -1054,7 +1137,8 @@ function enqueueTTSChunk(msgId, seq, url, createdAt, targetClientId) {
 
 async function playNextTTSChunk() {
   const hasChatroomTTS = ttsPlayOrder.some(id => id.startsWith('cm_'));
-  if (!hasChatroomTTS && !ttsEnabled && !(typeof videoCall !== 'undefined' && videoCall.active)) { ttsPlaying = false; return; }
+  const voiceCallActive = !!(window.VoiceCall && window.VoiceCall.isActive && window.VoiceCall.isActive());
+  if (!hasChatroomTTS && !ttsEnabled && !voiceCallActive && !(typeof videoCall !== 'undefined' && videoCall.active)) { ttsPlaying = false; return; }
 
   // 找到当前应该播放的 msgId
   while (ttsPlayOrder.length > 0) {
@@ -1063,7 +1147,8 @@ async function playNextTTSChunk() {
     if (!q) { ttsPlayOrder.shift(); continue; }
 
     const nextSeq = q.nextPlay;
-    let url = q.chunks[nextSeq];
+    let chunk = q.chunks[nextSeq];
+    let url = chunk && typeof chunk === "object" ? chunk.url : chunk;
     if (url === undefined) {
       // 如果该消息已标记完成且所有分段已播完，清理并继续下一条
       if (q.finished) {
@@ -1079,7 +1164,8 @@ async function playNextTTSChunk() {
           delete ttsChunkQueues[msgId];
           continue;
         }
-        url = q.chunks[q.nextPlay];
+        chunk = q.chunks[q.nextPlay];
+        url = chunk && typeof chunk === "object" ? chunk.url : chunk;
       }
       if (url === undefined) {
         // 下一个分段还没到，等待
@@ -1092,20 +1178,27 @@ async function playNextTTSChunk() {
     ttsPlaying = true;
     ttsManualStop = false;
     clearTTSResumeTimer();
-    try {
-      ttsAudio.src = url;
-      ttsAudio.onended = () => {
-        clearTTSResumeTimer();
-        ttsPlaying = false;
-        q.nextPlay++;
-        playNextTTSChunk();
-      };
-      ttsAudio.onerror = () => {
-        clearTTSResumeTimer();
-        ttsPlaying = false;
-        q.nextPlay++;
-        playNextTTSChunk();
-      };
+	    try {
+	      ttsAudio.src = url;
+	      _notifyVoiceCallPrivateTTSStart(msgId, q.nextPlay, chunk);
+	      ttsAudio.onended = () => {
+	        clearTTSResumeTimer();
+	        ttsPlaying = false;
+	        q.nextPlay++;
+	        if (window.VoiceCall && window.VoiceCall.handleTTSChunkEnd) {
+	          window.VoiceCall.handleTTSChunkEnd({ surface: "private", msgId });
+	        }
+	        playNextTTSChunk();
+	      };
+	      ttsAudio.onerror = () => {
+	        clearTTSResumeTimer();
+	        ttsPlaying = false;
+	        q.nextPlay++;
+	        if (window.VoiceCall && window.VoiceCall.handleTTSChunkEnd) {
+	          window.VoiceCall.handleTTSChunkEnd({ surface: "private", msgId });
+	        }
+	        playNextTTSChunk();
+	      };
       ttsAudio.onplaying = clearTTSResumeTimer;
       ttsAudio.onpause = () => {
         if (ttsAudio.ended) return;
@@ -1125,10 +1218,11 @@ async function playNextTTSChunk() {
 
   // 所有消息播完
   ttsPlaying = false;
-  if (voiceInCall || (typeof videoCall !== 'undefined' && videoCall.active)) {
-    notifyVoiceAiSpeaking(false);
-  }
-}
+	  if (voiceInCall || (typeof videoCall !== 'undefined' && videoCall.active)) {
+	    notifyVoiceAiSpeaking(false);
+	  }
+	  _notifyVoiceCallPrivateTTSEnd();
+	}
 
 function finishTTSForMsg(msgId, createdAt, targetClientId) {
   if (targetClientId && targetClientId !== _clientId) return;
@@ -1564,7 +1658,7 @@ function handleSync(msg) {
     }
   } else if (type === "tts_chunk") {
     // 服务端流式 TTS 分段音频到达
-    enqueueTTSChunk(data.msg_id, data.seq, data.url, data.created_at, data.target_client_id);
+    enqueueTTSChunk(data.msg_id, data.seq, data.url, data.created_at, data.target_client_id, data.text);
   } else if (type === "tts_done") {
     // 服务端通知该消息的所有 TTS 分段已推送完毕
     finishTTSForMsg(data.msg_id, data.created_at, data.target_client_id);
@@ -3287,6 +3381,36 @@ async function selectConv(id) {
   closeSidebar();
 }
 
+async function refreshCurrentConversationFromServer(options = {}) {
+  if (!currentConvId) return false;
+  const convId = currentConvId;
+  try {
+    conversations = await api("GET", "/api/conversations");
+    renderConvList();
+    const conv = conversations.find(c => c.id === convId);
+    if (conv && currentConvId === convId) {
+      $("chatTitle").textContent = conv.title;
+      if ($("modelSelect")) $("modelSelect").value = conv.model;
+    }
+  } catch (e) {
+    console.warn('[chat] refresh conversations failed:', e);
+  }
+
+  try {
+    const msgs = await api("GET", `/api/conversations/${convId}/messages?limit=${MSG_PAGE_SIZE}`);
+    if (currentConvId !== convId) return false;
+    setCurrentMessages(msgs);
+    hasMoreMessages = msgs.length >= MSG_PAGE_SIZE;
+    renderMessages();
+    if (options && options.scroll) scrollBottom();
+    return true;
+  } catch (e) {
+    console.warn('[chat] refresh current conversation failed:', e);
+    return false;
+  }
+}
+window.refreshCurrentConversationFromServer = refreshCurrentConversationFromServer;
+
 async function loadOlderMessages() {
   if (!currentConvId || !hasMoreMessages || loadingMore) return;
   loadingMore = true;
@@ -4162,6 +4286,124 @@ function handleSongGenStart(data) {
 }
 
 // ── 图片查看器（Lightbox） ──
+let imageLongPressTimer = null;
+let imageLongPressState = null;
+let imageLongPressSuppressClickUntil = 0;
+
+function imageInteractionAttrs() {
+  return 'onclick="return openImageFromElement(event, this)" oncontextmenu="showImageSaveMenu(this.src); return false;" onpointerdown="startImageLongPress(event, this.src)" onpointermove="moveImageLongPress(event)" onpointerup="cancelImageLongPress()" onpointerleave="cancelImageLongPress()" onpointercancel="cancelImageLongPress()" draggable="false"';
+}
+
+function bindImageSaveOnly(img, clickHandler) {
+  if (!img) return;
+  img.oncontextmenu = (event) => {
+    event.preventDefault();
+    showImageSaveMenu(img.src);
+    return false;
+  };
+  img.onpointerdown = (event) => startImageLongPress(event, img.src);
+  img.onpointermove = moveImageLongPress;
+  img.onpointerup = cancelImageLongPress;
+  img.onpointerleave = cancelImageLongPress;
+  img.onpointercancel = cancelImageLongPress;
+  img.onclick = (event) => {
+    event.stopPropagation();
+    if (Date.now() < imageLongPressSuppressClickUntil) {
+      event.preventDefault();
+      return false;
+    }
+    if (typeof clickHandler === 'function') clickHandler();
+    return false;
+  };
+  img.draggable = false;
+}
+
+function openImageFromElement(event, img) {
+  if (Date.now() < imageLongPressSuppressClickUntil) {
+    if (event) event.preventDefault();
+    return false;
+  }
+  openImageViewer(img.src);
+  return false;
+}
+
+function startImageLongPress(event, url) {
+  if (!url) return;
+  if (event.pointerType === 'mouse' && event.button !== 0) return;
+  cancelImageLongPress();
+  imageLongPressState = { x: event.clientX || 0, y: event.clientY || 0 };
+  imageLongPressTimer = setTimeout(() => {
+    imageLongPressTimer = null;
+    imageLongPressSuppressClickUntil = Date.now() + 700;
+    try { navigator.vibrate?.(12); } catch (e) {}
+    showImageSaveMenu(url);
+  }, 560);
+}
+
+function moveImageLongPress(event) {
+  if (!imageLongPressState) return;
+  const dx = Math.abs((event.clientX || 0) - imageLongPressState.x);
+  const dy = Math.abs((event.clientY || 0) - imageLongPressState.y);
+  if (dx > 12 || dy > 12) cancelImageLongPress();
+}
+
+function cancelImageLongPress() {
+  if (imageLongPressTimer) clearTimeout(imageLongPressTimer);
+  imageLongPressTimer = null;
+  imageLongPressState = null;
+}
+
+function closeImageSaveMenu() {
+  document.querySelector('.image-save-menu-overlay')?.remove();
+}
+
+function showImageSaveMenu(url) {
+  if (!url) return;
+  cancelImageLongPress();
+  closeImageSaveMenu();
+  const overlay = document.createElement('div');
+  overlay.className = 'image-save-menu-overlay';
+  const sheet = document.createElement('div');
+  sheet.className = 'image-save-menu';
+
+  const saveBtn = document.createElement('button');
+  saveBtn.type = 'button';
+  saveBtn.className = 'primary';
+  saveBtn.textContent = '保存图片';
+  saveBtn.addEventListener('click', () => {
+    closeImageSaveMenu();
+    saveImage(url);
+  });
+
+  const viewBtn = document.createElement('button');
+  viewBtn.type = 'button';
+  viewBtn.textContent = '查看大图';
+  viewBtn.addEventListener('click', () => {
+    closeImageSaveMenu();
+    openImageViewer(url);
+  });
+
+  const cancelBtn = document.createElement('button');
+  cancelBtn.type = 'button';
+  cancelBtn.textContent = '取消';
+  cancelBtn.addEventListener('click', closeImageSaveMenu);
+
+  sheet.append(saveBtn, viewBtn, cancelBtn);
+  overlay.appendChild(sheet);
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) closeImageSaveMenu();
+  });
+  document.body.appendChild(overlay);
+  requestAnimationFrame(() => overlay.classList.add('active'));
+}
+
+function getImageSaverBridge() {
+  try { if (window.AionImageSaver) return window.AionImageSaver; } catch (e) {}
+  try { if (window.parent && window.parent.AionImageSaver) return window.parent.AionImageSaver; } catch (e) {}
+  try { if (window.top && window.top.AionImageSaver) return window.top.AionImageSaver; } catch (e) {}
+  return null;
+}
+
 function openImageViewer(url) {
   const overlay = document.createElement('div');
   overlay.className = 'image-viewer-overlay';
@@ -4173,6 +4415,7 @@ function openImageViewer(url) {
       <button onclick="this.closest('.image-viewer-overlay').remove()">关闭</button>
     </div>
   `;
+  bindImageSaveOnly(overlay.querySelector('img'), () => overlay.remove());
   overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
   document.body.appendChild(overlay);
   requestAnimationFrame(() => overlay.classList.add('active'));
@@ -4182,12 +4425,13 @@ function saveImage(url) {
     .then(r => r.blob())
     .then(blob => {
       // Android App: 通过原生桥接保存到相册
-      if (window.AionImageSaver) {
+      const saver = getImageSaverBridge();
+      if (saver) {
         const reader = new FileReader();
         reader.onloadend = () => {
           const base64 = reader.result.split(',')[1];
           const filename = url.split('/').pop() || 'image.png';
-          window.AionImageSaver.save(base64, filename);
+          saver.save(base64, filename);
         };
         reader.readAsDataURL(blob);
         return;
@@ -4681,6 +4925,57 @@ function buildDateSummaryCard(item) {
   </div>`;
 }
 
+function safeHttpUrl(value) {
+  try {
+    const url = new URL(value || '', window.location.href);
+    return (url.protocol === 'http:' || url.protocol === 'https:') ? url.href : '';
+  } catch (e) {
+    return '';
+  }
+}
+
+function getExternalLinkBridge() {
+  try { if (window.AionExternal) return window.AionExternal; } catch (e) {}
+  try { if (window.parent && window.parent.AionExternal) return window.parent.AionExternal; } catch (e) {}
+  try { if (window.top && window.top.AionExternal) return window.top.AionExternal; } catch (e) {}
+  return null;
+}
+
+function openExternalLink(event, href) {
+  const url = safeHttpUrl(href);
+  if (!url) return true;
+  const bridge = getExternalLinkBridge();
+  if (!bridge || typeof bridge.open !== 'function') return true;
+  if (event && typeof event.preventDefault === 'function') event.preventDefault();
+  bridge.open(url);
+  return false;
+}
+
+function buildLinkPreviewCard(item) {
+  const href = safeHttpUrl(item?.url || '');
+  if (!href) return '';
+  let host = '';
+  try { host = new URL(href).hostname.replace(/^www\./, ''); } catch (e) {}
+  const title = escHtml(item.title || item.site_name || host || href);
+  const description = escHtml(item.description || '');
+  const source = escHtml(item.site_name || host || '网页链接');
+  const image = safeHttpUrl(item.image || '');
+  const favicon = safeHttpUrl(item.favicon || '');
+  const thumb = image
+    ? `<img class="link-preview-thumb-img" src="${escHtml(image)}" alt="" loading="lazy">`
+    : `<div class="link-preview-thumb-placeholder">URL</div>`;
+  const icon = favicon ? `<img class="link-preview-favicon" src="${escHtml(favicon)}" alt="" loading="lazy">` : '';
+  const hrefArg = escJsSingle(href);
+  return `<a class="link-preview-card" href="${escHtml(href)}" target="_blank" rel="noopener noreferrer" onclick="return openExternalLink(event,'${hrefArg}')">
+    <span class="link-preview-thumb">${thumb}</span>
+    <span class="link-preview-body">
+      <span class="link-preview-title">${title}</span>
+      ${description ? `<span class="link-preview-desc">${description}</span>` : ''}
+      <span class="link-preview-source">${icon}${source}</span>
+    </span>
+  </a>`;
+}
+
 function renderAttachments(atts) {
   if (!atts || !atts.length) return '';
   let mediaHtml = '';
@@ -4693,6 +4988,8 @@ function renderAttachments(atts) {
       mediaHtml += buildLuckinPaymentCard(item);
     } else if (typeof item === 'object' && item.type === 'date_summary') {
       mediaHtml += buildDateSummaryCard(item);
+    } else if (typeof item === 'object' && item.type === 'link_preview') {
+      mediaHtml += buildLinkPreviewCard(item);
     } else if (typeof item === 'object' && item.type === 'wish_fulfillment') {
       wishHtml += buildWishFulfillmentCard(item);
     } else if (typeof item === 'object' && item.type === 'music') {
@@ -4732,7 +5029,7 @@ function renderAttachments(atts) {
       const url = typeof item === 'string' ? item : (item && item.url ? item.url : '');
       if (/\.(mp4|webm|mov)$/i.test(url)) mediaHtml += `<video src="${escHtml(url)}" controls preload="metadata"></video>`;
       else if (/\.(mp3|wav|m4a|aac|ogg)$/i.test(url)) mediaHtml += `<audio src="${escHtml(url)}" controls preload="metadata"></audio>`;
-      else if (url) mediaHtml += `<img src="${escHtml(url)}" onclick="openImageViewer(this.src)">`;
+      else if (url) mediaHtml += `<img src="${escHtml(url)}" ${imageInteractionAttrs()}>`;
     }
   });
   let html = '';
@@ -6185,11 +6482,7 @@ function closeSubPage(skipReload = false) {
   applyAionTheme(localStorage.getItem('aion_chat_theme') || document.body.dataset.theme || 'dark');
   // 回到聊天页后重新加载消息列表（拿到后台生成完成的新消息）
   if (!skipReload && currentConvId) {
-    api("GET", `/api/conversations/${currentConvId}/messages?limit=${MSG_PAGE_SIZE}`).then(msgs => {
-      setCurrentMessages(msgs);
-      hasMoreMessages = msgs.length >= MSG_PAGE_SIZE;
-      renderMessages();
-    });
+    refreshCurrentConversationFromServer();
   }
 }
 // 导航到 Home（从任何功能页返回 Home）

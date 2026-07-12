@@ -13,7 +13,7 @@ from config import get_key, MODELS, UPLOADS_DIR, CODEX_UPLOADS_DIR, SETTINGS, ge
 # ── 网络代理策略 ───────────────────────────────────
 # 国内域名/IP 直连，绕过系统代理环境变量（HTTP_PROXY/HTTPS_PROXY）；
 # 否则保持 httpx 默认的 trust_env=True，让请求继续走代理（用于 Gemini 等国外服务）。
-# 这样火山引擎(ark.*.volces.com)、硅基流动等国内服务不再依赖梯子是否开启。
+# 这样火山引擎(ark.*.volces.com)、硅基流动等不再依赖梯子是否开启。
 _DOMESTIC_PROXY_SUFFIXES = (
     ".cn", ".com.cn",
     "volces.com",          # 火山引擎方舟
@@ -43,7 +43,6 @@ def _is_domestic_url(url: str) -> bool:
 def _make_http_client(url: str, *, timeout: int = 120) -> httpx.AsyncClient:
     """根据目标 URL 选择代理策略：国内直连，国外走环境变量代理。"""
     return httpx.AsyncClient(timeout=timeout, trust_env=not _is_domestic_url(url))
-
 
 # CLI 状态前缀：yield 此前缀的 chunk 会被 _bg_generate 拦截为状态事件，不送入 TTS 和正文
 CLI_STATUS_PREFIX = "\x00CLI_STATUS:"
@@ -356,8 +355,23 @@ class GeminiCliNoiseFilter:
         return out
 
 
-def _resolve_attachment_path(att: str) -> Path:
+def _attachment_file_ref(att) -> str:
+    if isinstance(att, str):
+        return att.strip()
+    if isinstance(att, dict):
+        att_type = str(att.get("type") or "").strip()
+        if att_type in {"link_preview", "music", "luckin_payment", "wish_fulfillment", "date_summary", "usage"}:
+            return ""
+        url = att.get("url")
+        return url.strip() if isinstance(url, str) else ""
+    return ""
+
+
+def _resolve_attachment_path(att) -> Path | None:
     """根据附件 URL 路径解析到本地文件"""
+    att = _attachment_file_ref(att)
+    if not att:
+        return None
     if att.startswith("/cr-uploads/"):
         # /cr-uploads/2026-05-07/xxx.jpg → CODEX_UPLOADS_DIR/2026-05-07/xxx.jpg
         rel = att[len("/cr-uploads/"):]
@@ -367,23 +381,6 @@ def _resolve_attachment_path(att: str) -> Path:
     else:
         # fallback: 只取文件名去主 uploads 找
         return UPLOADS_DIR / Path(att).name
-
-
-def _attachment_ref(att) -> tuple[str, str] | None:
-    """归一化附件为 (url路径, mime提示)。
-    - 字符串附件：直接是 URL 路径，mime 提示留空由文件后缀推断。
-    - dict 附件：前端上传的图片/文件格式为 {"url": "/uploads/x.jpg", "type": "image/jpeg", "name": ...}，
-      取 url + type(mime)。type 不是真正 mime（如 voice/video_clip/music/system_notice_order）
-      或没有 url 的结构化附件返回 None 跳过（这些要么已被转写成文本，要么不是可内联的文件）。
-    """
-    if isinstance(att, str):
-        return att, ""
-    if isinstance(att, dict):
-        url = att.get("url") or ""
-        mime = att.get("type") or ""
-        if url and "/" in mime:  # type 形如 image/jpeg 才是真正的文件附件
-            return url, mime
-    return None
 
 
 def _ensure_gemini_accessible(fpath: Path) -> Path:
@@ -412,17 +409,15 @@ def build_multimodal_messages(history: list):
             parts = []
             if m["content"]:
                 parts.append({"type": "text", "text": m["content"]})
+            has_file_parts = False
             for att in attachments:
-                ref = _attachment_ref(att)
-                if ref is None:
-                    continue  # 结构化附件(voice/music 等)已转写或不可内联
-                url, mime_hint = ref
-                fpath = _resolve_attachment_path(url)
-                if fpath.exists():
-                    mime = mime_hint or mimetypes.guess_type(str(fpath))[0] or "application/octet-stream"
+                fpath = _resolve_attachment_path(att)
+                if fpath and fpath.exists():
+                    mime = mimetypes.guess_type(str(fpath))[0] or "application/octet-stream"
                     b64 = base64.b64encode(fpath.read_bytes()).decode()
                     if mime.startswith("image/"):
                         parts.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
+                        has_file_parts = True
                     else:
                         parts.append({
                             "type": "text",
@@ -431,7 +426,8 @@ def build_multimodal_messages(history: list):
                                 "OpenAI-compatible relay payloads only include text and image_url parts.]"
                             ),
                         })
-            result.append({"role": m["role"], "content": parts if parts else m["content"]})
+                        has_file_parts = True
+            result.append({"role": m["role"], "content": parts if has_file_parts else m["content"]})
         else:
             result.append({"role": m["role"], "content": m["content"]})
     return result
@@ -451,13 +447,9 @@ def build_gemini_contents(history: list):
             parts.append({"text": m["content"]})
         if attachments and m["role"] == "user":
             for att in attachments:
-                ref = _attachment_ref(att)
-                if ref is None:
-                    continue  # 结构化附件(voice/music 等)已转写或不可内联
-                url, mime_hint = ref
-                fpath = _resolve_attachment_path(url)
-                if fpath.exists():
-                    mime = mime_hint or mimetypes.guess_type(str(fpath))[0] or "image/jpeg"
+                fpath = _resolve_attachment_path(att)
+                if fpath and fpath.exists():
+                    mime = mimetypes.guess_type(str(fpath))[0] or "image/jpeg"
                     b64 = base64.b64encode(fpath.read_bytes()).decode()
                     parts.append({"inline_data": {"mime_type": mime, "data": b64}})
         contents.append({"role": role, "parts": parts if parts else [{"text": m["content"]}]})
@@ -610,9 +602,7 @@ def _openai_chat_completions_url(base_url: str) -> str:
         return ""
     if base.endswith("/chat/completions"):
         return base
-    # 末段是版本号（如 /v1 /v2 /v3，含火山 /api/v3、/api/coding/v3）→ 仅补 /chat/completions
-    import re
-    if re.search(r"/v\d+$", base):
+    if base.endswith("/v1"):
         return f"{base}/chat/completions"
     return f"{base}/v1/chat/completions"
 
@@ -837,15 +827,15 @@ def _build_cli_prompt(messages: list, *, copy_cr_uploads: bool = False) -> str:
                 except Exception:
                     attachments = []
             for att in attachments:
-                ref = _attachment_ref(att)
-                if ref is None:
-                    continue  # 结构化附件(voice/music 等)已转写或不可内联
-                url, mime_hint = ref
-                fpath = _resolve_attachment_path(url)
+                if isinstance(att, dict):
+                    continue  # 跳过 voice/video 等结构化附件（已有 transcript 文本）
+                fpath = _resolve_attachment_path(att)
+                if not fpath:
+                    continue
                 if copy_cr_uploads:
                     fpath = _ensure_gemini_accessible(fpath)
-                if fpath.exists():
-                    mime = mime_hint or mimetypes.guess_type(str(fpath))[0] or ""
+                if fpath and fpath.exists():
+                    mime = mimetypes.guess_type(str(fpath))[0] or ""
                     if mime.startswith("image/"):
                         att_image_paths.append(str(fpath.resolve()))
                     elif mime.startswith("audio/"):
@@ -1328,38 +1318,18 @@ def _strip_antigravity_wire_noise(text: str) -> str:
 
 
 def _extract_antigravity_bot_text(payload: bytes) -> str:
-    """Extract the bot response from an agy type-15 step payload.
-
-    agy stores the visible reply as a length-delimited field shaped like
-    ``bot-<uuid>B<varint length><UTF-8 text><protobuf terminator>`` (the byte
-    right after ``B`` is a varint encoding the *byte length* of the text).
-    Decoding that varint lets us take exactly the text bytes, so neither the
-    leading varint prefix (e.g. ``M``/``!``/``;``) nor the binary protobuf
-    tail (`` `\\x02r...``) leaks into the chat / TTS / memory.
-
-    A previous version guessed the terminator as ``Z`` followed by a control
-    byte; agy 1.0.8 changed the terminator, that regex stopped matching, and
-    the code fell through to dumping the whole protobuf frame (binary garbage
-    after the real answer, which also tripped the auth-prompt false positive).
-    """
-    best = ""
-    for match in re.finditer(rb"bot-[0-9a-f-]{36}B", payload):
-        offset = match.end()
-        try:
-            length, offset = _read_protobuf_varint(payload, offset)
-        except ValueError:
-            continue
-        if length <= 0 or offset + length > len(payload):
-            continue
-        candidate = payload[offset:offset + length].decode("utf-8", errors="replace")
-        # Reject frames that decoded into binary noise rather than real text.
-        if not candidate.strip() or not all(
-            ch.isprintable() or ch in "\r\n\t" for ch in candidate
-        ):
-            continue
-        if len(candidate) > len(best):
-            best = candidate
-    return best.strip()
+    """Extract a bot response before its protobuf Z terminator and binary tail."""
+    raw = payload.decode("utf-8", errors="ignore")
+    match = re.search(
+        r"bot-[0-9a-f-]{36}B[\x00-\x08\x0b\x0c\x0e-\x1f]*"
+        r"(.+?)Z(?=[\x00-\x08\x0b\x0c\x0e-\x1f])",
+        raw,
+        re.DOTALL | re.IGNORECASE,
+    )
+    if not match:
+        return ""
+    candidate = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]+", "", match.group(1))
+    return candidate.strip()
 
 
 def _extract_antigravity_sqlite_output(log_path: Path | None, *, prefer_bot: bool = False) -> str:
@@ -1400,15 +1370,6 @@ def _extract_antigravity_sqlite_output(log_path: Path | None, *, prefer_bot: boo
         raw = payload.decode("utf-8", errors="ignore")
         printable = re.sub(r"[^\x09\x0a\x0d\x20-\x7e\u4e00-\u9fff\uff00-\uffef]+", " ", raw)
         if not printable.strip():
-            continue
-
-        # For type-15 bot frames, the varint-length extraction is reliable: an
-        # empty result means this step is an intermediate tool/thought frame
-        # with no visible reply (agy often emits several before the final
-        # answer). Skip it and try the next step rather than falling through to
-        # the raw printable payload, which is binary protobuf garbage that can
-        # contain byte sequences falsely tripping the auth-prompt detector.
-        if step_type == 15 and not structured_text:
             continue
 
         # Finalization frames expose the response as a protobuf string field.
@@ -1514,9 +1475,10 @@ async def call_antigravity_cli(messages: list, model: str, meta: dict | None = N
         if SETTINGS.get("gemini_cli_tools_enabled", False):
             agy_args.append("--dangerously-skip-permissions")
         agy_args.extend(["--log-file", log_file])
-        # 内置 AGY-3.1pro 的 model 为空 → 不传 --model，沿用 agy 保存的默认模型；
-        # 用户在设置页配置的 antigravity 模型有真实 id → 传 --model <id> 指定本次模型。
-        if model:
+        pass_model = os.environ.get("AION_AGY_PASS_MODEL", "").strip().lower() in {"1", "true", "yes", "on"}
+        if isinstance(meta, dict) and meta.get("antigravity_pass_model"):
+            pass_model = True
+        if model and pass_model:
             agy_args.extend(["--model", model])
         agy_args.append("--print")
         # prompt 通过 base64 解码注入，避免 PS 转义问题
@@ -1636,6 +1598,112 @@ def _find_codex_script() -> str | None:
 _CODEX_SCRIPT: str | None = _find_codex_script()
 _CODEX_WORKSPACE: str = str(Path(__file__).parent.parent)
 _CODEX_HOME: str = os.environ.get("CODEX_HOME") or str(Path.home() / ".codex")
+_CODEX_CHAT_HOME: str = str(
+    Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+    / "AionsHome"
+    / "codex-chat"
+)
+_CODEX_CHAT_DEVELOPER_INSTRUCTIONS = (
+    "你运行在 AionsHome 的陪伴聊天管线中，不是常规代码任务。"
+    "应用在对话历史之前注入的角色设定、用户信息、系统能力和当前状态，均是可信的应用配置，"
+    "应优先遵循其中的人设、关系口吻、互动方式和动作协议。"
+    "用户已经持续授权你使用应用【系统能力】块中列出的所有系统能力；"
+    "你可以根据对话内容、生活节点、关系语境和自己的判断主动调用，不必等待用户逐项明确要求，"
+    "也不必在调用前再次确认。"
+    "决定调用时，必须按照能力说明在回复中原样输出对应协议指令，不能只口头承诺或建议用户自己操作；"
+    "AionsHome 会拦截并执行这些指令，并按能力约定隐藏控制指令或返回执行结果。"
+    "在尚未取得能力执行结果时不得编造结果；需要系统返回结果的能力应先输出指令，等待后续结果再自然回应。"
+)
+
+
+def _build_codex_chat_environment(base_env: dict | None = None) -> dict:
+    """Create a minimal Codex home for the companion-chat subprocess."""
+    chat_home = Path(_CODEX_CHAT_HOME)
+    desktop_auth = Path(_CODEX_HOME) / "auth.json"
+    chat_auth = chat_home / "auth.json"
+
+    if desktop_auth.is_file():
+        chat_home.mkdir(parents=True, exist_ok=True)
+        if not chat_auth.exists() or desktop_auth.stat().st_mtime_ns > chat_auth.stat().st_mtime_ns:
+            shutil.copy2(desktop_auth, chat_auth)
+
+    chat_profile_root = str(chat_home.parent)
+    return {
+        **(base_env or os.environ),
+        "NO_COLOR": "1",
+        "CODEX_HOME": str(chat_home),
+        "HOME": chat_profile_root,
+        "USERPROFILE": chat_profile_root,
+    }
+
+
+def _build_codex_chat_command(node: str, script: str, workspace: str, model: str) -> list[str]:
+    cmd = [
+        node,
+        script,
+        "-c",
+        'model_verbosity="high"',
+        "-c",
+        f"developer_instructions={json.dumps(_CODEX_CHAT_DEVELOPER_INSTRUCTIONS, ensure_ascii=False)}",
+        "--ask-for-approval",
+        "never",
+        "--sandbox",
+        "read-only",
+        "-C",
+        workspace,
+        "exec",
+        "--json",
+        "--skip-git-repo-check",
+        "--ignore-user-config",
+        "--ignore-rules",
+        "--ephemeral",
+        "--color",
+        "never",
+        "-",
+    ]
+    if model:
+        cmd[2:2] = ["-m", model]
+    return cmd
+
+
+def _usage_int(value) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _apply_codex_usage_meta(meta: dict | None, usage: dict | None) -> None:
+    if meta is None or not usage:
+        return
+
+    input_tokens = _usage_int(usage.get("input_tokens"))
+    output_tokens = _usage_int(usage.get("output_tokens"))
+    total_tokens = _usage_int(usage.get("total_tokens")) or input_tokens + output_tokens
+    cached_tokens = _usage_int(usage.get("cached_input_tokens"))
+    reasoning_tokens = _usage_int(usage.get("reasoning_output_tokens"))
+
+    meta["prompt_tokens"] = input_tokens
+    meta["completion_tokens"] = output_tokens
+    meta["total_tokens"] = total_tokens
+
+    raw = dict(usage)
+    raw.setdefault("prompt_tokens", input_tokens)
+    raw.setdefault("completion_tokens", output_tokens)
+    raw.setdefault("total_tokens", total_tokens)
+
+    if cached_tokens:
+        prompt_details = dict(raw.get("prompt_tokens_details") or {})
+        prompt_details.setdefault("cached_tokens", cached_tokens)
+        raw["prompt_tokens_details"] = prompt_details
+
+    if reasoning_tokens:
+        completion_details = dict(raw.get("completion_tokens_details") or {})
+        completion_details.setdefault("reasoning_tokens", reasoning_tokens)
+        raw["completion_tokens_details"] = completion_details
+
+    meta["raw"] = raw
+
 
 async def call_codex_cli(messages: list, model: str, meta: dict | None = None,
                          temperature: float | None = None, max_tokens: int | None = None):
@@ -1647,20 +1715,10 @@ async def call_codex_cli(messages: list, model: str, meta: dict | None = None,
         yield "[CodexCLI错误] 未找到 Codex CLI，请检查 Connor-Codex/node_modules/@openai/codex 是否已安装"
         return
 
-    cmd = [node, _CODEX_SCRIPT,
-           "--search",
-           "exec", "--json",
-           "--dangerously-bypass-approvals-and-sandbox",
-           "--skip-git-repo-check",
-           "--color", "never",
-           "-C", _CODEX_WORKSPACE,
-           "-"]
-    if model:
-        cmd[4:4] = ["-m", model]
+    cmd = _build_codex_chat_command(node, _CODEX_SCRIPT, _CODEX_WORKSPACE, model)
 
     try:
-        env = {**os.environ, "NO_COLOR": "1"}
-        env.setdefault("CODEX_HOME", _CODEX_HOME)
+        env = _build_codex_chat_environment()
         proc = await _spawn_cli_process(cmd, prompt, env)
 
         last_agent_text = ""
@@ -1704,11 +1762,7 @@ async def call_codex_cli(messages: list, model: str, meta: dict | None = None,
                         last_agent_text = item.get("text", "")
                 elif etype == "turn.completed":
                     usage = event.get("usage", {})
-                    if meta is not None and usage:
-                        meta["prompt_tokens"] = usage.get("input_tokens", 0)
-                        meta["completion_tokens"] = usage.get("output_tokens", 0)
-                        meta["total_tokens"] = meta["prompt_tokens"] + meta["completion_tokens"]
-                        meta["raw"] = usage
+                    _apply_codex_usage_meta(meta, usage)
         if line_buf.strip():
             try:
                 event = json.loads(line_buf.strip())
@@ -1722,11 +1776,7 @@ async def call_codex_cli(messages: list, model: str, meta: dict | None = None,
                     last_agent_text = item.get("text", "")
                 elif etype == "turn.completed":
                     usage = event.get("usage", {})
-                    if meta is not None and usage:
-                        meta["prompt_tokens"] = usage.get("input_tokens", 0)
-                        meta["completion_tokens"] = usage.get("output_tokens", 0)
-                        meta["total_tokens"] = meta["prompt_tokens"] + meta["completion_tokens"]
-                        meta["raw"] = usage
+                    _apply_codex_usage_meta(meta, usage)
 
         await proc.wait()
 
@@ -1807,7 +1857,6 @@ async def simple_ai_call(
     messages: list,
     model_key: str,
     temperature: float | None = None,
-    max_tokens: int | None = None,
     *,
     trace_label: str = "simple_ai_call",
 ) -> str:
@@ -1818,7 +1867,7 @@ async def simple_ai_call(
     raw_chunks = []
     error = ""
     try:
-        async for chunk in stream_ai(messages, model_key, temperature=temperature, max_tokens=max_tokens):
+        async for chunk in stream_ai(messages, model_key, temperature=temperature):
             raw_chunks.append(chunk)
             if chunk.startswith(CLI_STATUS_PREFIX):
                 continue
@@ -1853,13 +1902,9 @@ def _messages_have_images(messages: list) -> bool:
             try: atts = json.loads(atts) if atts else []
             except: atts = []
         for att in atts:
-            ref = _attachment_ref(att)
-            if ref is None:
-                continue  # 结构化附件(voice/music 等)不是图片
-            url, mime_hint = ref
-            fpath = _resolve_attachment_path(url)
-            if fpath.exists():
-                mime = mime_hint or mimetypes.guess_type(str(fpath))[0] or ""
+            fpath = _resolve_attachment_path(att)
+            if fpath and fpath.exists():
+                mime = mimetypes.guess_type(str(fpath))[0] or ""
                 if mime.startswith("image/"):
                     return True
     return False
@@ -1886,16 +1931,11 @@ async def _sentinel_describe_images(messages: list) -> list:
         img_descs = []
         non_img_atts = []
         for att in atts:
-            ref = _attachment_ref(att)
-            if ref is None:
-                non_img_atts.append(att)  # voice/music 等结构化附件原样保留
-                continue
-            url, mime_hint = ref
-            fpath = _resolve_attachment_path(url)
-            if not fpath.exists():
+            fpath = _resolve_attachment_path(att)
+            if not fpath or not fpath.exists():
                 non_img_atts.append(att)
                 continue
-            mime = mime_hint or mimetypes.guess_type(str(fpath))[0] or ""
+            mime = mimetypes.guess_type(str(fpath))[0] or ""
             if not mime.startswith("image/"):
                 non_img_atts.append(att)
                 continue

@@ -17,11 +17,19 @@ let memSourceMemId = null;
 let memSourceMessages = [];
 let chatroomMemoryCache = [];
 let chatroomMemoryKindFilter = 'all';
+let chatroomMemoryKindMenuId = null;
 let chatroomDailyCompressReview = null;
 let crMsgDebugData = {};
 let crSystemLogs = [];
 let crSysLogHasUnreadError = false;
 const CR_AMBIENT_LOCAL_ARMED_KEY = 'aion_chatroom_ambient_local_armed';
+
+document.addEventListener('click', () => {
+  if (!chatroomMemoryKindMenuId) return;
+  chatroomMemoryKindMenuId = null;
+  renderChatroomMemories();
+});
+
 function crMakeAmbientClientId() {
   try {
     if (crypto?.randomUUID) return `ambient_${crypto.randomUUID()}`;
@@ -186,6 +194,7 @@ let crTtsAionVoice = '';
 let crTtsConnorVoice = '';
 const crSeenTTSChunks = new Set();
 const crSeenTTSDone = new Set();
+const crTtsMsgSenders = {};
 let crWs = null;
 let crTtsAcceptAfter = Date.now() / 1000;
 let crTtsPlaybackActiveAt = Date.now() / 1000;
@@ -242,6 +251,45 @@ function crReportAudioPlayFailure(label, err, audio) {
   try { toast(`语音播放失败：${reason}`); } catch(e) {}
 }
 
+function crRememberTTSMsgSender(msgId, sender) {
+  if (msgId && sender) crTtsMsgSenders[msgId] = sender;
+}
+
+function crSenderForTTSMsg(msgId) {
+  if (crTtsMsgSenders[msgId]) return crTtsMsgSenders[msgId];
+  const stored = crMessagesById[msgId]?.sender;
+  if (stored) return stored;
+  if (String(msgId || "").endsWith("_a")) return "aion";
+  if (String(msgId || "").endsWith("_c")) return "connor";
+  return currentRoom?.type === "connor_1v1" ? "connor" : "aion";
+}
+
+function crNotifyVoiceCallTTSStart(msgId, seq, item) {
+  if (!window.VoiceCall || !window.VoiceCall.handleTTSChunkStart) return;
+  const sender = crSenderForTTSMsg(msgId);
+  window.VoiceCall.handleTTSChunkStart({
+    surface: "chatroom",
+    msgId,
+    seq,
+    url: item?.url || item,
+    text: item?.text || "",
+    sender,
+    speakerName: crName(sender)
+  });
+}
+
+function crNotifyVoiceCallTTSChunkEnd(msgId) {
+  if (window.VoiceCall && window.VoiceCall.handleTTSChunkEnd) {
+    window.VoiceCall.handleTTSChunkEnd({ surface: "chatroom", msgId });
+  }
+}
+
+function crNotifyVoiceCallTTSEnd() {
+  if (window.VoiceCall && window.VoiceCall.handleTTSEnd) {
+    window.VoiceCall.handleTTSEnd({ surface: "chatroom" });
+  }
+}
+
 // TTS 播放引擎：Audio 使用本地对象（可靠播放），离开页面时移交给 parent（尽力续播）
 const _ttsEngine = (function() {
   // 在 parent 上预建一个 handoff audio，用于离开页面后续播当前片段
@@ -281,14 +329,16 @@ const _ttsEngine = (function() {
         const msgId = eng.playOrder[0];
         const q = eng.chunkQueues[msgId];
         if (!q) { eng.playOrder.shift(); continue; }
-        let url = q.chunks[q.nextPlay];
+        let item = q.chunks[q.nextPlay];
+        let url = item && typeof item === "object" ? item.url : item;
         if (url === undefined) {
           if (q.finished) {
             const maxSeq = Object.keys(q.chunks).length > 0 ? Math.max(...Object.keys(q.chunks).map(Number)) : -1;
             if (q.nextPlay > maxSeq) { eng.playOrder.shift(); delete eng.chunkQueues[msgId]; continue; }
             while (q.nextPlay <= maxSeq && q.chunks[q.nextPlay] === undefined) q.nextPlay++;
             if (q.nextPlay > maxSeq) { eng.playOrder.shift(); delete eng.chunkQueues[msgId]; continue; }
-            url = q.chunks[q.nextPlay];
+            item = q.chunks[q.nextPlay];
+            url = item && typeof item === "object" ? item.url : item;
           }
           if (url === undefined) {
             eng.playing = false;
@@ -297,44 +347,56 @@ const _ttsEngine = (function() {
           }
         }
         eng.playing = true;
-        _stopRequested = false;
-        clearResumeTimer();
-        crAmbientPauseForTts();
-        const myId = ++_cbId;
-        const advance = () => {
-          if (myId !== _cbId) return; // 过时回调，忽略
-          clearResumeTimer();
-          _cbId++;
-          eng.playing = false;
-          q.nextPlay++;
-          eng._next();
-        };
-        eng.audio.src = url;
-        eng.audio.onended = advance;
-        eng.audio.onerror = advance;
-        eng.audio.onplaying = clearResumeTimer;
+	        _stopRequested = false;
+	        clearResumeTimer();
+	        crAmbientPauseForTts();
+	        const myId = ++_cbId;
+	        const seq = q.nextPlay;
+	        let startNotified = false;
+	        const notifyStart = () => {
+	          if (startNotified) return;
+	          startNotified = true;
+	          crNotifyVoiceCallTTSStart(msgId, seq, item);
+	        };
+	        const advance = () => {
+	          if (myId !== _cbId) return; // 过时回调，忽略
+	          clearResumeTimer();
+	          _cbId++;
+	          eng.playing = false;
+	          q.nextPlay++;
+	          crNotifyVoiceCallTTSChunkEnd(msgId);
+	          eng._next();
+	        };
+	        eng.audio.src = url;
+	        eng.audio.onended = advance;
+	        eng.audio.onerror = advance;
+	        eng.audio.onplaying = () => {
+	          clearResumeTimer();
+	          notifyStart();
+	        };
         eng.audio.onpause = () => {
           if (myId !== _cbId || eng.audio.ended) return;
           scheduleResume();
         };
-        eng.audio.play().catch((err) => {
+	        eng.audio.play().then(notifyStart).catch((err) => {
           // 外部 App 抢占音频焦点时，play() 可能会短暂失败；保留当前分片，等待焦点恢复。
           crReportAudioPlayFailure('live chunk', err, eng.audio);
           scheduleResume();
         });
         return;
-      }
-      eng.playing = false;
-      crAmbientResumeAfterTts();
-    },
-    enqueue(msgId, seq, url) {
-      if (!eng.chunkQueues[msgId]) {
-        eng.chunkQueues[msgId] = { nextPlay: 0, chunks: {}, finished: false };
-        eng.playOrder.push(msgId);
-      }
-      eng.chunkQueues[msgId].chunks[seq] = url;
-      if (!eng.playing) eng._next();
-    },
+	      }
+	      eng.playing = false;
+	      crAmbientResumeAfterTts();
+	      crNotifyVoiceCallTTSEnd();
+	    },
+	    enqueue(msgId, seq, url, text = "") {
+	      if (!eng.chunkQueues[msgId]) {
+	        eng.chunkQueues[msgId] = { nextPlay: 0, chunks: {}, finished: false };
+	        eng.playOrder.push(msgId);
+	      }
+	      eng.chunkQueues[msgId].chunks[seq] = { url, text: text || "" };
+	      if (!eng.playing) eng._next();
+	    },
     finish(msgId) {
       const q = eng.chunkQueues[msgId];
       if (!q) return;
@@ -352,10 +414,11 @@ const _ttsEngine = (function() {
       _cbId++;
       _stopRequested = true;
       clearResumeTimer();
-      eng.audio.pause(); eng.audio.src = '';
-      eng.chunkQueues = {}; eng.playOrder = []; eng.playing = false;
-      crAmbientResumeAfterTts(500);
-    }
+	      eng.audio.pause(); eng.audio.src = '';
+	      eng.chunkQueues = {}; eng.playOrder = []; eng.playing = false;
+	      crAmbientResumeAfterTts(500);
+	      crNotifyVoiceCallTTSEnd();
+	    }
   };
 
   // 页面卸载时，把当前正在播放的音频移交到 parent audio 续播
@@ -614,13 +677,14 @@ function crPlayMusicOnline(songId) {
   audio.play().catch(() => {});
 }
 
-function crEnqueueTTSChunk(msgId, seq, url, createdAt, targetClientId) {
-  if (!crTtsEnabled) return;
+function crEnqueueTTSChunk(msgId, seq, url, createdAt, targetClientId, text = "") {
+  const voiceCallActive = !!(window.VoiceCall && window.VoiceCall.isActive && window.VoiceCall.isActive());
+  if (!crTtsEnabled && !voiceCallActive) return;
   const key = `${msgId}:${seq}`;
   if (crSeenTTSChunks.has(key)) return;
   crSeenTTSChunks.add(key);
   if (!crShouldAcceptTTSMsg(msgId, createdAt, targetClientId)) return;
-  _ttsEngine.enqueue(msgId, seq, url);
+  _ttsEngine.enqueue(msgId, seq, url, text);
 }
 
 async function crPlayNextTTSChunk() {
@@ -638,6 +702,57 @@ function crFinishTTSForMsg(msgId, createdAt, targetClientId) {
   crSeenTTSDone.add(msgId);
   _ttsEngine.finish(msgId);
 }
+
+window.ChatroomVoiceCallAdapter = {
+  getDefaultSpeakerName() {
+    return currentRoom?.type === "connor_1v1" ? crName("connor") : crName("aion");
+  },
+  getSpeakerName(sender) {
+    return crName(sender || (currentRoom?.type === "connor_1v1" ? "connor" : "aion"));
+  },
+  speakerForMessage(msgId) {
+    return crSenderForTTSMsg(msgId);
+  },
+  async sendText(text) {
+    const content = String(text || "").trim();
+    if (!content) return;
+    if (!currentRoom) throw new Error("请先选择聊天室");
+    let waited = 0;
+    while ((isSending || isAiChatting || isReplyOnce) && waited < 10000) {
+      await new Promise(resolve => setTimeout(resolve, 200));
+      waited += 200;
+    }
+    if (isSending || isAiChatting || isReplyOnce) throw new Error("上一轮回复仍在进行");
+
+    isSending = true;
+    sendBtn.disabled = true;
+    playSend();
+    const localRow = appendMessage({ sender: "user", content, created_at: Date.now() / 1000, attachments: [] });
+    if (localRow) localRow.dataset.localEcho = "1";
+    try {
+      const resp = await fetch(`${API}/rooms/${currentRoom.id}/send`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          content,
+          model: chatroomModel,
+          connor_model: chatroomConnorModel,
+          attachments: [],
+          tts_enabled: true,
+          tts_aion_voice: crTtsAionVoice,
+          tts_connor_voice: crTtsConnorVoice,
+          whisper_mode: crWhisperMode
+        }),
+      });
+      await consumeChatroomSSE(resp);
+    } finally {
+      isSending = false;
+      sendBtn.disabled = false;
+      endStreamingBubble();
+      crRefocusComposerAfterSend();
+    }
+  }
+};
 
 function crStopTTS() {
   _ttsEngine.stop();
@@ -786,6 +901,18 @@ const chatSearchInput = document.getElementById('chatSearchInput');
 const chatSearchMeta = document.getElementById('chatSearchMeta');
 const chatSearchResults = document.getElementById('chatSearchResults');
 let chatSearchKeyword = '';
+
+function crShouldAutoFocusComposer() {
+  const isCoarsePointer = !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+  const hasTouch = (navigator.maxTouchPoints || 0) > 0;
+  const isNarrow = window.innerWidth <= 768;
+  return !(isCoarsePointer || hasTouch || isNarrow);
+}
+
+function crRefocusComposerAfterSend() {
+  if (!crShouldAutoFocusComposer()) return;
+  inputEl?.focus();
+}
 
 // ══════════════════════════════════════════════════
 //  工具函数
@@ -2071,6 +2198,63 @@ async function loadMessages() {
   } catch(e) {}
 }
 
+async function refreshCurrentChatroomFromServer(options = {}) {
+  if (!currentRoom) return false;
+  const roomId = currentRoom.id;
+
+  try {
+    rooms = await api('/rooms');
+    const room = rooms.find(r => r.id === roomId);
+    if (currentRoom && currentRoom.id === roomId) {
+      if (room) {
+        currentRoom = room;
+        roomTitleEl.textContent = room.title;
+        if (activeTab !== room.type) switchTab(room.type);
+        else renderRoomList();
+        updateHeaderActions();
+      } else {
+        renderRoomList();
+      }
+    }
+  } catch(e) {
+    console.warn('[chatroom] refresh rooms failed:', e);
+  }
+
+  let msgs;
+  try {
+    msgs = await api(`/rooms/${roomId}/messages?limit=100`);
+  } catch(e) {
+    console.warn('[chatroom] refresh current room failed:', e);
+    return false;
+  }
+  if (!currentRoom || currentRoom.id !== roomId) return false;
+
+  if (msgs && msgs.length) {
+    oldestMsgTs = msgs[0].created_at;
+    noMoreMessages = msgs.length < 100;
+  } else {
+    oldestMsgTs = null;
+    noMoreMessages = true;
+  }
+  loadingOlder = false;
+  renderMessages(msgs);
+  if (options && options.scroll) scrollToBottom(true);
+
+  try {
+    const payload = JSON.stringify({ savedAt: Date.now(), messages: msgs });
+    if (payload.length < 900000) {
+      const snapshotKey = `chatroom_messages_snapshot_v1_${roomId}`;
+      localStorage.setItem(snapshotKey, payload);
+      try {
+        const bridge = window.top?.AppSharedData || window.AppSharedData;
+        bridge?.put?.(snapshotKey, payload);
+      } catch(e) {}
+    }
+  } catch(e) {}
+  return true;
+}
+window.refreshCurrentChatroomFromServer = refreshCurrentChatroomFromServer;
+
 async function loadOlderMessages() {
   if (!currentRoom || noMoreMessages || loadingOlder || !oldestMsgTs) return;
   loadingOlder = true;
@@ -2816,7 +3000,7 @@ async function saveChatroomEdit(msgId) {
     isSending = false;
     sendBtn.disabled = false;
     endStreamingBubble();
-    inputEl.focus();
+    crRefocusComposerAfterSend();
   }
 }
 
@@ -3158,13 +3342,14 @@ composer.addEventListener('submit', async (e) => {
     isSending = false;
     sendBtn.disabled = false;
     endStreamingBubble();
-    inputEl.focus();
+    crRefocusComposerAfterSend();
   }
 });
 
 function handleSSE(data) {
   switch (data.type) {
     case 'aion_start':
+      crRememberTTSMsgSender(data.id, 'aion');
       appendTyping(crName('aion'));
       // 延迟创建流式气泡，等第一个 chunk 到达时再创建
       pendingStreamSender = 'aion';
@@ -3188,10 +3373,12 @@ function handleSSE(data) {
       if (data.message && data.message.content != null && streamingBubble) {
         streamingText = data.message.content;
       }
+      if (data.message?.id) crRememberTTSMsgSender(data.message.id, 'aion');
       endStreamingBubble(data.message);
       playRecv();
       break;
     case 'connor_start':
+      crRememberTTSMsgSender(data.id, 'connor');
       appendTyping(crName('connor'));
       pendingStreamSender = 'connor';
       pendingStreamId = data.id;
@@ -3214,6 +3401,7 @@ function handleSSE(data) {
       if (data.message && data.message.content != null && streamingBubble) {
         streamingText = data.message.content;
       }
+      if (data.message?.id) crRememberTTSMsgSender(data.message.id, 'connor');
       endStreamingBubble(data.message);
       // 如果 connor_done 带了 message 且没有流式气泡（兼容旧路径），追加消息
       if (data.message
@@ -3227,7 +3415,7 @@ function handleSSE(data) {
       appendAiChatStatus(`AI 互聊 第 ${data.round}/${data.total} 轮`);
       break;
     case 'tts_chunk':
-      crEnqueueTTSChunk(data.data.msg_id, data.data.seq, data.data.url, data.data.created_at, data.data.target_client_id);
+      crEnqueueTTSChunk(data.data.msg_id, data.data.seq, data.data.url, data.data.created_at, data.data.target_client_id, data.data.text);
       break;
     case 'tts_done':
       crFinishTTSForMsg(data.data.msg_id, data.data.created_at, data.data.target_client_id);
@@ -3236,7 +3424,13 @@ function handleSSE(data) {
       toast('错误: ' + data.content);
       break;
     case 'system_msg':
-      if (data.message) { appendMessage(data.message); }
+      if (data.message) {
+        if (data.message.id) crMessagesById[data.message.id] = data.message;
+        if (data.message.id && data.message.sender) crRememberTTSMsgSender(data.message.id, data.message.sender);
+        if (!data.message.id || !messagesEl.querySelector(`[data-msg-id="${data.message.id}"]`)) {
+          appendMessage(data.message);
+        }
+      }
       break;
     case 'memory_record':
       crShowMemoryRecordHint(data.msg_id, data.content);
@@ -4439,13 +4633,19 @@ function renderChatroomMemories(focusMemId = '') {
     const date = crFormatMemoryOccurrence(m);
     const kw = m.keywords ? `关键词: ${esc(m.keywords)}` : '';
     const hasSource = Number(m.source_count || 0) > 0;
-    const kindLabel = m.memory_kind_label || (chatroomMemoryKind(m) === 'daily' ? '日常' : '长期重要');
-    const kindClass = chatroomMemoryKind(m) === 'daily' ? 'daily' : 'long-term';
+    const curKind = chatroomMemoryKind(m);
+    const kindLabel = m.memory_kind_label || (curKind === 'daily' ? '日常' : '长期重要');
+    const kindClass = curKind === 'daily' ? 'daily' : 'long-term';
+    const menuOpen = chatroomMemoryKindMenuId === m.id;
+    const kindMenu = menuOpen ? `<div class="mem-kind-menu" onclick="event.stopPropagation()">
+      <button class="${curKind === 'long_term' ? 'active' : ''}" onclick="selectChatroomMemoryKind('${m.id}','long_term',event)">长期重要</button>
+      <button class="${curKind === 'daily' ? 'active' : ''}" onclick="selectChatroomMemoryKind('${m.id}','daily',event)">日常</button>
+    </div>` : '';
     const unresolved = Boolean(m.unresolved);
     return `
       <div class="mem-item${unresolved ? ' mem-unresolved' : ''}" data-id="${m.id}">
         <div class="mem-head">
-          <span class="mem-kind ${kindClass}">${esc(kindLabel)}</span>
+          <div class="mem-kind-wrap"><button class="mem-kind ${kindClass}" onclick="openChatroomMemoryKindMenu('${m.id}', event)" title="点击选择标签" aria-label="选择记忆标签">${esc(kindLabel)}</button>${kindMenu}</div>
           <div class="mem-content">${esc(m.content)}</div>
           <div class="mem-actions">
             <button class="mem-pin${unresolved ? ' active' : ''}" onclick="toggleChatroomMemoryUnresolved('${m.id}')" title="${unresolved ? '取消未完成标记' : '标记为未完成'}">📌</button>
@@ -4562,6 +4762,47 @@ async function toggleChatroomMemoryUnresolved(memId) {
     renderChatroomMemories(memId);
   } catch (err) {
     toast('切换未完成状态失败: ' + err.message);
+  }
+}
+
+function openChatroomMemoryKindMenu(memId, event) {
+  if (event) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
+  chatroomMemoryKindMenuId = chatroomMemoryKindMenuId === memId ? null : memId;
+  renderChatroomMemories(memId);
+}
+
+async function selectChatroomMemoryKind(memId, nextKind, event) {
+  if (event) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
+  const mem = chatroomMemoryCache.find(item => item.id === memId);
+  if (!mem) return;
+  if (chatroomMemoryKind(mem) === nextKind) {
+    chatroomMemoryKindMenuId = null;
+    renderChatroomMemories(memId);
+    return;
+  }
+  const prevKind = mem.memory_kind;
+  const prevLabel = mem.memory_kind_label;
+  mem.memory_kind = nextKind;
+  mem.memory_kind_label = nextKind === 'daily' ? '日常' : '长期重要';
+  chatroomMemoryKindMenuId = null;
+  renderChatroomMemories(memId);
+  try {
+    const result = await api(`/memories/${memId}`, {
+      method: 'PUT',
+      body: JSON.stringify({ memory_kind: nextKind }),
+    });
+    if (result && result.error) throw new Error(result.error);
+  } catch (err) {
+    mem.memory_kind = prevKind;
+    mem.memory_kind_label = prevLabel;
+    renderChatroomMemories(memId);
+    toast('切换记忆标签失败: ' + err.message);
   }
 }
 
@@ -4764,7 +5005,7 @@ function connectWS() {
       }
 
       if (data.type === 'tts_chunk' && data.data) {
-        crEnqueueTTSChunk(data.data.msg_id, data.data.seq, data.data.url, data.data.created_at, data.data.target_client_id);
+        crEnqueueTTSChunk(data.data.msg_id, data.data.seq, data.data.url, data.data.created_at, data.data.target_client_id, data.data.text);
       }
 
       if (data.type === 'tts_done' && data.data) {
@@ -4793,6 +5034,7 @@ function connectWS() {
       if (data.type === 'chatroom_msg_created' && currentRoom) {
         const msg = data.data;
         if (msg.room_id === currentRoom.id) {
+          if (msg.id && msg.sender) crRememberTTSMsgSender(msg.id, msg.sender);
           // 避免重复：流式回复本身已有 streaming 行；异步跟进消息即使还在发送中也要显示。
           const existing = document.getElementById(`streaming-${msg.id}`);
           if (!existing && !messagesEl.querySelector(`[data-msg-id="${msg.id}"]`)) {
@@ -5240,6 +5482,205 @@ function buildDateSummaryCard(item) {
   </div>`;
 }
 
+let imageLongPressTimer = null;
+let imageLongPressState = null;
+let imageLongPressSuppressClickUntil = 0;
+
+function imageInteractionAttrs() {
+  return 'onclick="return openImageFromElement(event, this)" oncontextmenu="showImageSaveMenu(this.src); return false;" onpointerdown="startImageLongPress(event, this.src)" onpointermove="moveImageLongPress(event)" onpointerup="cancelImageLongPress()" onpointerleave="cancelImageLongPress()" onpointercancel="cancelImageLongPress()" draggable="false"';
+}
+
+function bindImageSaveOnly(img, clickHandler) {
+  if (!img) return;
+  img.oncontextmenu = (event) => {
+    event.preventDefault();
+    showImageSaveMenu(img.src);
+    return false;
+  };
+  img.onpointerdown = (event) => startImageLongPress(event, img.src);
+  img.onpointermove = moveImageLongPress;
+  img.onpointerup = cancelImageLongPress;
+  img.onpointerleave = cancelImageLongPress;
+  img.onpointercancel = cancelImageLongPress;
+  img.onclick = (event) => {
+    event.stopPropagation();
+    if (Date.now() < imageLongPressSuppressClickUntil) {
+      event.preventDefault();
+      return false;
+    }
+    if (typeof clickHandler === 'function') clickHandler();
+    return false;
+  };
+  img.draggable = false;
+}
+
+function openImageFromElement(event, img) {
+  if (Date.now() < imageLongPressSuppressClickUntil) {
+    if (event) event.preventDefault();
+    return false;
+  }
+  openImageViewer(img.src);
+  return false;
+}
+
+function startImageLongPress(event, url) {
+  if (!url) return;
+  if (event.pointerType === 'mouse' && event.button !== 0) return;
+  cancelImageLongPress();
+  imageLongPressState = { x: event.clientX || 0, y: event.clientY || 0 };
+  imageLongPressTimer = setTimeout(() => {
+    imageLongPressTimer = null;
+    imageLongPressSuppressClickUntil = Date.now() + 700;
+    try { navigator.vibrate?.(12); } catch (e) {}
+    showImageSaveMenu(url);
+  }, 560);
+}
+
+function moveImageLongPress(event) {
+  if (!imageLongPressState) return;
+  const dx = Math.abs((event.clientX || 0) - imageLongPressState.x);
+  const dy = Math.abs((event.clientY || 0) - imageLongPressState.y);
+  if (dx > 12 || dy > 12) cancelImageLongPress();
+}
+
+function cancelImageLongPress() {
+  if (imageLongPressTimer) clearTimeout(imageLongPressTimer);
+  imageLongPressTimer = null;
+  imageLongPressState = null;
+}
+
+function closeImageSaveMenu() {
+  document.querySelector('.image-save-menu-overlay')?.remove();
+}
+
+function showImageSaveMenu(url) {
+  if (!url) return;
+  cancelImageLongPress();
+  closeImageSaveMenu();
+  const overlay = document.createElement('div');
+  overlay.className = 'image-save-menu-overlay';
+  const sheet = document.createElement('div');
+  sheet.className = 'image-save-menu';
+
+  const saveBtn = document.createElement('button');
+  saveBtn.type = 'button';
+  saveBtn.className = 'primary';
+  saveBtn.textContent = '保存图片';
+  saveBtn.addEventListener('click', () => {
+    closeImageSaveMenu();
+    saveImage(url);
+  });
+
+  const viewBtn = document.createElement('button');
+  viewBtn.type = 'button';
+  viewBtn.textContent = '查看大图';
+  viewBtn.addEventListener('click', () => {
+    closeImageSaveMenu();
+    openImageViewer(url);
+  });
+
+  const cancelBtn = document.createElement('button');
+  cancelBtn.type = 'button';
+  cancelBtn.textContent = '取消';
+  cancelBtn.addEventListener('click', closeImageSaveMenu);
+
+  sheet.append(saveBtn, viewBtn, cancelBtn);
+  overlay.appendChild(sheet);
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) closeImageSaveMenu();
+  });
+  document.body.appendChild(overlay);
+  requestAnimationFrame(() => overlay.classList.add('active'));
+}
+
+function getImageSaverBridge() {
+  try {
+    if (typeof _getNativeBridge === 'function') return _getNativeBridge('AionImageSaver');
+  } catch (e) {}
+  try { if (window.AionImageSaver) return window.AionImageSaver; } catch (e) {}
+  try { if (window.parent && window.parent.AionImageSaver) return window.parent.AionImageSaver; } catch (e) {}
+  try { if (window.top && window.top.AionImageSaver) return window.top.AionImageSaver; } catch (e) {}
+  return null;
+}
+
+function saveImage(url) {
+  fetch(url)
+    .then(r => r.blob())
+    .then(blob => {
+      const saver = getImageSaverBridge();
+      if (saver) {
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          const base64 = reader.result.split(',')[1];
+          const filename = url.split('/').pop() || 'image.png';
+          saver.save(base64, filename);
+        };
+        reader.readAsDataURL(blob);
+        return;
+      }
+      const blobUrl = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = blobUrl;
+      a.download = url.split('/').pop() || 'image.png';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+    })
+    .catch(() => window.open(url, '_blank'));
+}
+
+function crSafeHttpUrl(value) {
+  try {
+    const url = new URL(value || '', window.location.href);
+    return (url.protocol === 'http:' || url.protocol === 'https:') ? url.href : '';
+  } catch (e) {
+    return '';
+  }
+}
+
+function crGetExternalLinkBridge() {
+  try { if (window.AionExternal) return window.AionExternal; } catch (e) {}
+  try { if (window.parent && window.parent.AionExternal) return window.parent.AionExternal; } catch (e) {}
+  try { if (window.top && window.top.AionExternal) return window.top.AionExternal; } catch (e) {}
+  return null;
+}
+
+function crOpenExternalLink(event, href) {
+  const url = crSafeHttpUrl(href);
+  if (!url) return true;
+  const bridge = crGetExternalLinkBridge();
+  if (!bridge || typeof bridge.open !== 'function') return true;
+  if (event && typeof event.preventDefault === 'function') event.preventDefault();
+  bridge.open(url);
+  return false;
+}
+
+function crBuildLinkPreviewCard(item) {
+  const href = crSafeHttpUrl(item?.url || '');
+  if (!href) return '';
+  let host = '';
+  try { host = new URL(href).hostname.replace(/^www\./, ''); } catch (e) {}
+  const title = esc(item.title || item.site_name || host || href);
+  const description = esc(item.description || '');
+  const source = esc(item.site_name || host || '网页链接');
+  const image = crSafeHttpUrl(item.image || '');
+  const favicon = crSafeHttpUrl(item.favicon || '');
+  const thumb = image
+    ? `<img class="link-preview-thumb-img" src="${esc(image)}" alt="" loading="lazy">`
+    : `<div class="link-preview-thumb-placeholder">URL</div>`;
+  const icon = favicon ? `<img class="link-preview-favicon" src="${esc(favicon)}" alt="" loading="lazy">` : '';
+  const hrefArg = crEscJsSingle(href);
+  return `<a class="link-preview-card" href="${esc(href)}" target="_blank" rel="noopener noreferrer" onclick="return crOpenExternalLink(event,'${hrefArg}')">
+    <span class="link-preview-thumb">${thumb}</span>
+    <span class="link-preview-body">
+      <span class="link-preview-title">${title}</span>
+      ${description ? `<span class="link-preview-desc">${description}</span>` : ''}
+      <span class="link-preview-source">${icon}${source}</span>
+    </span>
+  </a>`;
+}
+
 function renderAttachments(atts) {
   if (!atts || !atts.length) return '';
   let html = '';
@@ -5252,6 +5693,8 @@ function renderAttachments(atts) {
       html += buildLuckinPaymentCard(item);
     } else if (type === 'date_summary') {
       html += buildDateSummaryCard(item);
+    } else if (type === 'link_preview') {
+      html += crBuildLinkPreviewCard(item);
     } else if (type === 'wish_fulfillment') {
       wishHtml += crBuildWishFulfillmentCard(item);
     } else if (type === 'music') {
@@ -5274,7 +5717,7 @@ function renderAttachments(atts) {
       if (/\.(mp3|wav|m4a|aac|ogg)$/i.test(url)) {
         html += `<audio src="${esc(url)}" controls preload="metadata"></audio>`;
       } else {
-        html += `<img src="${esc(url)}" onclick="openImageViewer(this.src)">`;
+        html += `<img src="${esc(url)}" ${imageInteractionAttrs()}>`;
       }
     }
   });
@@ -5317,7 +5760,9 @@ function removeChatroomAttachment(i) {
 
 function openImageViewer(src) {
   const viewer = document.getElementById('imageViewer');
-  document.getElementById('viewerImg').src = src;
+  const viewerImg = document.getElementById('viewerImg');
+  viewerImg.src = src;
+  bindImageSaveOnly(document.getElementById('viewerImg'), closeImageViewer);
   viewer.classList.add('active');
 }
 
@@ -5423,7 +5868,7 @@ function escWithImages(str) {
     let imgUrl = match[1];
     if (imgUrl.startsWith('/uploads/')) imgUrl = '/cr-uploads/' + imgUrl.slice('/uploads/'.length);
     const safeUrl = esc(imgUrl);
-    result += `<img class="cr-inline-img" src="${safeUrl}" onclick="openImageViewer(this.src)" loading="lazy">`;
+    result += `<img class="cr-inline-img" src="${safeUrl}" ${imageInteractionAttrs()} loading="lazy">`;
     lastIdx = imgRe.lastIndex;
   }
   const tail = str.slice(lastIdx);
@@ -5872,7 +6317,7 @@ async function _crVoiceSend(audioBlob, duration) {
     isSending = false;
     sendBtn.disabled = false;
     endStreamingBubble();
-    inputEl.focus();
+    crRefocusComposerAfterSend();
   }
 }
 

@@ -113,6 +113,9 @@ public class AionPushService extends Service {
 
     private static final String TAG = "AionPush";
     public static final String ACTION_REFRESH_CLOUDFLARE_AUTH = "refresh_cloudflare_auth";
+    private static final String PREFS = "aion_prefs";
+    private static final String PREF_SAVED_URL = "saved_url";
+    private static final String DEFAULT_PAGE_URL = "http://192.168.xx.xxx:8080/chat";
 
     private static final String CH_KEEPALIVE = "aion_keepalive";
     private static final String CH_MESSAGE   = "aion_message_heads_up_v2";
@@ -261,20 +264,48 @@ public class AionPushService extends Service {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         boolean endpointChanged = false;
+        String action = null;
         if (intent != null) {
-            String action = intent.getStringExtra("action");
-            if ("set_foreground".equals(action)) {
+            action = intent.getStringExtra("action");
+
+            String url = intent.getStringExtra("url");
+            if (url != null) {
+                String normalizedPageUrl = ConnectionEndpoint.normalizePageUrl(url);
+                getSharedPreferences(PREFS, MODE_PRIVATE)
+                        .edit()
+                        .putString(PushServiceStartPolicy.PREF_LAST_ACTIVE_URL, normalizedPageUrl)
+                        .apply();
+                String ws = ConnectionEndpoint.toWebSocketUrl(normalizedPageUrl);
+                if (ws.equals(serverUrl) && wsConnected.get()) {
+                    Log.d(TAG, "Already connected to " + serverUrl);
+                    if (action == null) return START_STICKY;
+                }
+                endpointChanged = serverUrl != null && !ws.equals(serverUrl);
+                if (endpointChanged) resetWebSocketForEndpointChange();
+                serverUrl = ws;
+            }
+
+            if (PushServiceStartPolicy.ACTION_SET_FOREGROUND.equals(action)) {
                 isForegroundActive = intent.getBooleanExtra("active", false);
-                if (isForegroundActive) stopMusic(); // WebView 接管，停止原生播放
+                // WebView takes over playback while the page is foregrounded.
+                if (isForegroundActive) stopMusic();
                 Log.d(TAG, "foreground=" + isForegroundActive);
-                return START_STICKY;
+                if (PushServiceStartPolicy.canReturnAfterLightweightAction(
+                        action, serverUrl, isHeartbeatThreadAlive())) {
+                    return START_STICKY;
+                }
+                Log.i(TAG, "Foreground action cold-started service; continuing bootstrap");
             }
             if (ACTION_REFRESH_CLOUDFLARE_AUTH.equals(action)) {
-                if (isCloudflareServer() && !wsConnected.get()) {
-                    reconnectDelay = 3000;
-                    connectWebSocket();
+                if (PushServiceStartPolicy.canReturnAfterLightweightAction(
+                        action, serverUrl, isHeartbeatThreadAlive())) {
+                    if (isCloudflareServer() && !wsConnected.get()) {
+                        reconnectDelay = 3000;
+                        connectWebSocket();
+                    }
+                    return START_STICKY;
                 }
-                return START_STICKY;
+                Log.i(TAG, "Cloudflare auth action cold-started service; continuing bootstrap");
             }
             if (ACTION_START_PHONE_SCREEN.equals(action)) {
                 int resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, 0);
@@ -290,27 +321,22 @@ public class AionPushService extends Service {
                 requestAccessibilityPhoneScreen("manual_test", true);
                 return START_STICKY;
             }
-
-            String url = intent.getStringExtra("url");
-            if (url != null) {
-                String ws = ConnectionEndpoint.toWebSocketUrl(url);
-                if (ws.equals(serverUrl) && wsConnected.get()) {
-                    Log.d(TAG, "Already connected to " + serverUrl);
-                    return START_STICKY;
-                }
-                endpointChanged = serverUrl != null && !ws.equals(serverUrl);
-                if (endpointChanged) resetWebSocketForEndpointChange();
-                serverUrl = ws;
-            }
         }
 
         if (serverUrl == null) {
-            SharedPreferences prefs = getSharedPreferences("aion_prefs", MODE_PRIVATE);
-            String saved = prefs.getString("saved_url", "http://192.168.xx.xxx:8080/chat");
-            String normalized = ConnectionEndpoint.normalizePageUrl(saved);
-            if (!normalized.equals(saved)) {
-                prefs.edit().putString("saved_url", normalized).apply();
+            SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+            String saved = prefs.getString(PREF_SAVED_URL, DEFAULT_PAGE_URL);
+            String lastActive = prefs.getString(
+                    PushServiceStartPolicy.PREF_LAST_ACTIVE_URL, "");
+            String fallback = PushServiceStartPolicy.chooseFallbackPageUrl(
+                    lastActive, saved, DEFAULT_PAGE_URL);
+            String normalized = ConnectionEndpoint.normalizePageUrl(fallback);
+            SharedPreferences.Editor editor = prefs.edit()
+                    .putString(PushServiceStartPolicy.PREF_LAST_ACTIVE_URL, normalized);
+            if (fallback.equals(saved) && !normalized.equals(saved)) {
+                editor.putString(PREF_SAVED_URL, normalized);
             }
+            editor.apply();
             serverUrl = ConnectionEndpoint.toWebSocketUrl(normalized);
         }
 
@@ -338,6 +364,10 @@ public class AionPushService extends Service {
         startRingSyncThread();
         if (endpointChanged) connectWebSocket();
         return START_STICKY;
+    }
+
+    private boolean isHeartbeatThreadAlive() {
+        return heartbeatThread != null && heartbeatThread.isAlive();
     }
 
     private synchronized void resetWebSocketForEndpointChange() {

@@ -38,6 +38,10 @@ class MemoryUpdate(BaseModel):
     evidence_summary: Optional[str] = None
 
 
+class MemoryKindUpdate(BaseModel):
+    memory_kind: str
+
+
 class AnchorReset(BaseModel):
     date: str
 
@@ -277,6 +281,29 @@ async def update_memory(mem_id: str, body: MemoryUpdate):
         await db.execute(f"UPDATE memories SET {', '.join(fields)} WHERE id=?", params)
         await db.commit()
     return {"ok": True, "id": mem_id}
+
+
+@router.patch("/api/memories/{mem_id}/kind")
+async def update_memory_kind(mem_id: str, body: MemoryKindUpdate):
+    selected_kind = "daily" if body.memory_kind == "daily" else "long_term" if body.memory_kind == "long_term" else ""
+    if not selected_kind:
+        raise HTTPException(status_code=400, detail="memory_kind must be daily or long_term")
+    new_type = "daily" if selected_kind == "daily" else "important"
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT id FROM memories WHERE id=?", (mem_id,))
+        row = await cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Memory not found")
+        await db.execute("UPDATE memories SET type=? WHERE id=?", (new_type, mem_id))
+        await db.commit()
+    return {
+        "ok": True,
+        "id": mem_id,
+        "type": new_type,
+        "memory_kind": selected_kind,
+        "memory_kind_label": memory_kind_label(new_type),
+    }
 
 
 @router.delete("/api/memories/{mem_id}")

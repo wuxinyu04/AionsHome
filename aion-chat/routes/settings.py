@@ -4,14 +4,14 @@
 
 import json
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response, FileResponse
 from pydantic import BaseModel, Field
 from typing import Any, Dict, Optional
 
 import httpx
 
-from config import SETTINGS, save_settings, get_key, get_sentinel_config, load_worldbook, save_worldbook, load_chat_status, TTS_CACHE_DIR, TTS_CACHE_MAX_BYTES, THEATER_TTS_CACHE_DIR, normalize_custom_model_routes, normalize_antigravity_models, refresh_custom_models, iter_visible_models
+from config import SETTINGS, save_settings, get_key, get_sentinel_config, load_worldbook, save_worldbook, load_chat_status, TTS_CACHE_DIR, TTS_CACHE_MAX_BYTES, THEATER_TTS_CACHE_DIR, normalize_custom_model_routes, refresh_custom_models, iter_visible_models
 from tts import cleanup_tts_cache_dir
 from ws import manager
 
@@ -42,8 +42,8 @@ class SettingsUpdate(BaseModel):
     senseaudio_key: Optional[str] = None
     minimax_key: Optional[str] = None
     tts_provider: Optional[str] = None
+    tavily_api_key: Optional[str] = None
     netease_music_u: Optional[str] = None
-    netease_uid: Optional[str] = None
     sentinel_base_url: Optional[str] = None
     sentinel_api_key: Optional[str] = None
     sentinel_model: Optional[str] = None
@@ -56,7 +56,6 @@ class SettingsUpdate(BaseModel):
     luckin_default_latitude: Optional[str] = None
     luckin_default_shop_keyword: Optional[str] = None
     custom_model_routes: Optional[list[Dict[str, Any]]] = None
-    antigravity_models: Optional[list[Dict[str, Any]]] = None
 
 class HomeLayoutUpdate(BaseModel):
     version: Optional[int] = 2
@@ -103,8 +102,8 @@ async def get_settings():
         "senseaudio_key": SETTINGS.get("senseaudio_key", ""),
         "minimax_key": SETTINGS.get("minimax_key", ""),
         "tts_provider": SETTINGS.get("tts_provider", "siliconflow"),
+        "tavily_api_key": SETTINGS.get("tavily_api_key", ""),
         "netease_music_u": SETTINGS.get("netease_music_u", ""),
-        "netease_uid": SETTINGS.get("netease_uid", ""),
         "sentinel_base_url": SETTINGS.get("sentinel_base_url", ""),
         "sentinel_api_key": SETTINGS.get("sentinel_api_key", ""),
         "sentinel_model": SETTINGS.get("sentinel_model", ""),
@@ -117,13 +116,13 @@ async def get_settings():
         "luckin_default_latitude": SETTINGS.get("luckin_default_latitude", ""),
         "luckin_default_shop_keyword": SETTINGS.get("luckin_default_shop_keyword", ""),
         "custom_model_routes": normalize_custom_model_routes(SETTINGS.get("custom_model_routes")),
-        "antigravity_models": normalize_antigravity_models(SETTINGS.get("antigravity_models")),
         "gemini_key_masked": mask(SETTINGS.get("gemini_key", "")),
         "siliconflow_key_masked": mask(SETTINGS.get("siliconflow_key", "")),
         "gemini_free_key_masked": mask(SETTINGS.get("gemini_free_key", "")),
         "aipro_key_masked": mask(SETTINGS.get("aipro_key", "")),
         "senseaudio_key_masked": mask(SETTINGS.get("senseaudio_key", "")),
         "minimax_key_masked": mask(SETTINGS.get("minimax_key", "")),
+        "tavily_api_key_masked": mask(SETTINGS.get("tavily_api_key", "")),
         "netease_music_u_masked": mask(SETTINGS.get("netease_music_u", "")),
         "sentinel_api_key_masked": mask(SETTINGS.get("sentinel_api_key", "")),
         "embedding_api_key_masked": mask(SETTINGS.get("embedding_api_key", "")),
@@ -146,6 +145,8 @@ async def update_settings(body: SettingsUpdate):
         SETTINGS["minimax_key"] = body.minimax_key
     if body.tts_provider is not None:
         SETTINGS["tts_provider"] = body.tts_provider
+    if body.tavily_api_key is not None:
+        SETTINGS["tavily_api_key"] = body.tavily_api_key
     if body.sentinel_base_url is not None:
         SETTINGS["sentinel_base_url"] = body.sentinel_base_url
     if body.sentinel_api_key is not None:
@@ -173,9 +174,6 @@ async def update_settings(body: SettingsUpdate):
     if body.custom_model_routes is not None:
         SETTINGS["custom_model_routes"] = normalize_custom_model_routes(body.custom_model_routes)
         refresh_custom_models()
-    if body.antigravity_models is not None:
-        SETTINGS["antigravity_models"] = normalize_antigravity_models(body.antigravity_models)
-        refresh_custom_models()
     if body.netease_music_u is not None:
         old_mu = SETTINGS.get("netease_music_u", "")
         SETTINGS["netease_music_u"] = body.netease_music_u
@@ -186,8 +184,6 @@ async def update_settings(body: SettingsUpdate):
                 reload_login()
             except Exception:
                 pass
-    if body.netease_uid is not None:
-        SETTINGS["netease_uid"] = body.netease_uid
     save_settings(SETTINGS)
     if luckin_changed:
         try:
@@ -250,6 +246,111 @@ async def update_song_gen_setting(body: SongGenToggle):
     SETTINGS["song_gen_enabled"] = body.enabled
     save_settings(SETTINGS)
     return {"ok": True, "song_gen_enabled": body.enabled}
+
+# ── 微信桥接设置 ─────────────────────────────────
+class WeChatBridgeSettingsUpdate(BaseModel):
+    enabled: Optional[bool] = None
+    transport: Optional[str] = None
+    webhook_url: Optional[str] = None
+    webhook_token: Optional[str] = None
+    inbound_token: Optional[str] = None
+    openclaw_home: Optional[str] = None
+    context_stale_seconds: Optional[int] = None
+
+
+class WeChatBridgeBindingCreate(BaseModel):
+    source_type: Optional[str] = None
+    source_id: Optional[str] = None
+    ttl_seconds: Optional[int] = None
+
+
+@router.get("/api/settings/wechat-bridge")
+async def get_wechat_bridge_setting():
+    from wechat_bridge import public_wechat_bindings
+
+    openclaw_accounts = []
+    openclaw_status_error = ""
+    try:
+        from openclaw_weixin import summarize_accounts
+
+        openclaw_accounts = summarize_accounts(SETTINGS.get("wechat_bridge_openclaw_home") or None)
+    except Exception as exc:
+        openclaw_status_error = str(exc)
+
+    pending = SETTINGS.get("wechat_bridge_pending_bindings")
+    if not isinstance(pending, dict):
+        pending = {}
+    return {
+        "wechat_bridge_enabled": SETTINGS.get("wechat_bridge_enabled", False),
+        "wechat_bridge_transport": SETTINGS.get("wechat_bridge_transport", "webhook"),
+        "wechat_bridge_webhook_url": SETTINGS.get("wechat_bridge_webhook_url", ""),
+        "wechat_bridge_webhook_token": SETTINGS.get("wechat_bridge_webhook_token", ""),
+        "wechat_bridge_inbound_token": SETTINGS.get("wechat_bridge_inbound_token", ""),
+        "wechat_bridge_openclaw_home": SETTINGS.get("wechat_bridge_openclaw_home", ""),
+        "wechat_bridge_context_stale_seconds": SETTINGS.get("wechat_bridge_context_stale_seconds", 15 * 60),
+        "wechat_bridge_last_send": SETTINGS.get("wechat_bridge_last_send"),
+        "openclaw_accounts": openclaw_accounts,
+        "openclaw_status_error": openclaw_status_error,
+        "bindings": public_wechat_bindings(settings=SETTINGS),
+        "pending_bindings": list(pending.values()),
+    }
+
+
+@router.put("/api/settings/wechat-bridge")
+async def update_wechat_bridge_setting(body: WeChatBridgeSettingsUpdate):
+    if body.enabled is not None:
+        SETTINGS["wechat_bridge_enabled"] = bool(body.enabled)
+    if body.transport is not None:
+        transport = body.transport.strip().lower()
+        if transport not in ("webhook", "openclaw"):
+            raise HTTPException(status_code=400, detail="transport must be webhook or openclaw")
+        SETTINGS["wechat_bridge_transport"] = transport
+    if body.webhook_url is not None:
+        SETTINGS["wechat_bridge_webhook_url"] = body.webhook_url.strip()
+    if body.webhook_token is not None:
+        SETTINGS["wechat_bridge_webhook_token"] = body.webhook_token.strip()
+    if body.inbound_token is not None:
+        SETTINGS["wechat_bridge_inbound_token"] = body.inbound_token.strip()
+    if body.openclaw_home is not None:
+        SETTINGS["wechat_bridge_openclaw_home"] = body.openclaw_home.strip()
+    if body.context_stale_seconds is not None:
+        SETTINGS["wechat_bridge_context_stale_seconds"] = max(60, int(body.context_stale_seconds))
+    save_settings(SETTINGS)
+    return {
+        "ok": True,
+        "wechat_bridge_enabled": SETTINGS.get("wechat_bridge_enabled", False),
+        "wechat_bridge_transport": SETTINGS.get("wechat_bridge_transport", "webhook"),
+        "wechat_bridge_webhook_url": SETTINGS.get("wechat_bridge_webhook_url", ""),
+    }
+
+
+@router.post("/api/settings/wechat-bridge/bindings")
+async def create_wechat_bridge_binding(body: WeChatBridgeBindingCreate):
+    from wechat_bridge import create_wechat_pending_binding, get_recorded_wechat_route
+
+    route = get_recorded_wechat_route()
+    source_type = (body.source_type or route.get("source_type") or "").strip()
+    source_id = (body.source_id or route.get("source_id") or "").strip()
+    if not source_type or not source_id:
+        raise HTTPException(status_code=400, detail="source_type and source_id are required when no recent WeChat route exists")
+
+    SETTINGS["wechat_bridge_enabled"] = True
+    SETTINGS["wechat_bridge_transport"] = "openclaw"
+    pending = create_wechat_pending_binding(
+        source_type=source_type,
+        source_id=source_id,
+        ttl_seconds=body.ttl_seconds or 10 * 60,
+        settings=SETTINGS,
+    )
+    save_settings(SETTINGS)
+    return {
+        "ok": True,
+        "code": pending["code"],
+        "source_type": pending["source_type"],
+        "source_id": pending["source_id"],
+        "expires_at": pending["expires_at"],
+        "instruction": f"Send this in WeChat: bind {pending['code']}",
+    }
 
 @router.get("/api/settings/gemini-cli-tools")
 async def get_gemini_cli_tools_setting():
@@ -348,7 +449,7 @@ async def tts_synthesize(body: TTSRequest):
     if not body.voice:
         return Response(content=json.dumps({"error": "未选择语音"}), status_code=400, media_type="application/json")
     try:
-        async with httpx.AsyncClient(timeout=30, trust_env=False) as client:
+        async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
                 "https://api.siliconflow.cn/v1/audio/speech",
                 headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
@@ -400,130 +501,13 @@ async def theater_tts_audio(msg_id: str):
         return Response(status_code=404)
     return FileResponse(cache_path, media_type="audio/mpeg", filename=f"{safe_id}.mp3")
 
-# CosyVoice2 系统预置音色。硅基的 /v1/audio/voice/list 只返回用户克隆音色，
-# 不含系统音色——账号没克隆过时返回空，导致前端音色下拉没选项、TTS 无法触发。
-# 这里作为兜底，列表为空时补上这些免费可用的系统音色（实测 alex/claire 等可直接合成）。
-_COSYVOICE2_SYSTEM_VOICES = [
-    {"uri": "FunAudioLLM/CosyVoice2-0.5B:alex", "name": "Alex（男）"},
-    {"uri": "FunAudioLLM/CosyVoice2-0.5B:benjamin", "name": "Benjamin（男）"},
-    {"uri": "FunAudioLLM/CosyVoice2-0.5B:charles", "name": "Charles（男）"},
-    {"uri": "FunAudioLLM/CosyVoice2-0.5B:claire", "name": "Claire（女）"},
-    {"uri": "FunAudioLLM/CosyVoice2-0.5B:david", "name": "David（男）"},
-    {"uri": "FunAudioLLM/CosyVoice2-0.5B:diana", "name": "Diana（女）"},
-]
-
-# SenseAudio Free 版（实名后默认）可调用的普通音色。当 /v1/get_voice 接口失败或返回空时兜底。
-_SENSEAUDIO_FREE_VOICES = [
-    {"uri": "child_0001_a", "customName": "可爱萌娃（开心）"},
-    {"uri": "child_0001_b", "customName": "可爱萌娃（平稳）"},
-    {"uri": "male_0004_a", "customName": "儒雅道长（平稳）"},
-    {"uri": "male_0018_a", "customName": "沙哑青年（深情）"},
-]
-
-
-# SenseAudio Free 版（实名后默认）可直接调用的 voice_id 集合（来自官方文档音色列表页）。
-# 其他音色可能需要 Plus/Pro 等更高套餐，调了会报权限错误。
-_SENSEAUDIO_FREE_VOICE_IDS = {"child_0001_a", "child_0001_b", "male_0004_a", "male_0018_a"}
-
-
-# MiniMax 系统音色 —— 男友陪伴向精选（8 个中文男声）
-# 砍到只保留中文男声，所有显示名都是中文，下拉一目了然不再翻不到。
-# 后续想扩展（克隆声/新增声）再补。
-_MINIMAX_SYSTEM_VOICES = [
-    {"uri": "junlang_nanyou", "customName": "⭐ 俊朗男友（名字就是男友）"},
-    {"uri": "male-qn-jingying", "customName": "精英青年（磁性主流）"},
-    {"uri": "male-qn-qingse", "customName": "青涩青年（清朗少年）"},
-    {"uri": "male-qn-daxuesheng", "customName": "青年大学生（校园感）"},
-    {"uri": "male-qn-badao", "customName": "霸道青年（强气男友）"},
-    {"uri": "Chinese (Mandarin)_Gentleman", "customName": "温润男声（温柔绅士）"},
-    {"uri": "Chinese (Mandarin)_Pure-hearted_Boy", "customName": "清澈邻家弟弟"},
-    {"uri": "lengdan_xiongzhang", "customName": "冷淡学长（冷都男友）"},
-]
-
-
-async def _list_senseaudio_voices(key: str) -> dict:
-    """调 SenseAudio /v1/get_voice 拉音色列表；失败/空时回退 Free 版音色。"""
-    try:
-        async with httpx.AsyncClient(timeout=15, trust_env=False) as client:
-            resp = await client.post(
-                "https://api.senseaudio.cn/v1/get_voice",
-                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-                json={"voice_type": "system"},
-            )
-        if resp.status_code != 200:
-            return {"voices": _SENSEAUDIO_FREE_VOICES, "note": f"获取音色列表失败({resp.status_code})，已回退免费音色"}
-        data = resp.json()
-        # SenseAudio 返回 {system_voice:[{voice_id,voice_name,...}], voice_cloning:[], voice_generation:[]}
-        items = data.get("system_voice") or data.get("data") or data.get("result") or data.get("voices") or []
-        # 同一 voice_name 有多个后缀变体(a/b/c...，对应不同情绪)，前端会显示成重复项。
-        # 按 voice_name 去重：Free 版可用的变体优先，否则取第一个；标注可用/可能受限。
-        by_name: dict[str, dict] = {}
-        for it in items:
-            if not isinstance(it, dict):
-                continue
-            vid = it.get("voice_id") or it.get("id") or ""
-            if not vid:
-                continue
-            vname = it.get("voice_name") or it.get("name") or vid
-            existing = by_name.get(vname)
-            if existing is None:
-                by_name[vname] = {"vid": vid, "free": vid in _SENSEAUDIO_FREE_VOICE_IDS}
-            elif vid in _SENSEAUDIO_FREE_VOICE_IDS and not by_name[vname]["free"]:
-                # 已有同名但非 Free 变体，换成 Free 版可用的
-                by_name[vname] = {"vid": vid, "free": True}
-        voices = []
-        for vname, info in by_name.items():
-            tag = "" if info["free"] else "（可能受限）"
-            voices.append({"uri": info["vid"], "customName": f"{vname}{tag}"})
-        # Free 版可用的音色排最前
-        voices.sort(key=lambda v: 0 if "(可能受限)" not in v["customName"] else 1)
-        if not voices:
-            voices = _SENSEAUDIO_FREE_VOICES
-        return {"voices": voices}
-    except Exception as e:
-        return {"voices": _SENSEAUDIO_FREE_VOICES, "note": f"音色列表请求异常：{e}，已回退免费音色"}
-
-
-async def _list_minimax_voices(key: str) -> dict:
-    """返回 MiniMax 男友向精选音色列表（固定 8 个中文男声）。
-
-    不再去 /v1/get_voice 拉全量 —— 那个接口返回 327 个混合多语种，下拉翻不完，
-    而且 voice_name 可能是英文。本项目的男友向场景只需要中文男声，硬编码 curated 列表
-    体验更好；后续想扩展（克隆声/新增系统声）再合并即可。
-    """
-    # 顺手用一下 key 做个连通性检测，避免 key 失效时没有任何反馈
-    try:
-        async with httpx.AsyncClient(timeout=10, trust_env=False) as client:
-            await client.post(
-                "https://api.minimax.io/v1/get_voice",
-                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-                json={"voice_type": "system"},
-            )
-    except Exception:
-        pass  # 探测失败不影响，返回 curated 列表即可
-    return {"voices": _MINIMAX_SYSTEM_VOICES}
-
-
 @router.get("/api/tts/voices")
 async def tts_voice_list():
-    from config import get_tts_provider
-    provider = get_tts_provider()
-    if provider == "senseaudio":
-        key = get_key("senseaudio")
-        if not key:
-            return {"voices": [], "error": "未配置 SenseAudio API Key"}
-        return await _list_senseaudio_voices(key)
-    if provider == "minimax":
-        key = get_key("minimax")
-        if not key:
-            return {"voices": [], "error": "未配置 MiniMax API Key"}
-        return await _list_minimax_voices(key)
-    # 默认硅基流动
     key = get_key("siliconflow")
     if not key:
         return {"voices": [], "error": "未配置硅基流动 API Key"}
     try:
-        async with httpx.AsyncClient(timeout=15, trust_env=False) as client:
+        async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.get(
                 "https://api.siliconflow.cn/v1/audio/voice/list",
                 headers={"Authorization": f"Bearer {key}"}
@@ -532,9 +516,6 @@ async def tts_voice_list():
             return {"voices": [], "error": "获取音色列表失败"}
         data = resp.json()
         voices = data.get("result") or data.get("voices") or data.get("data") or []
-        # 硅基接口只返回用户克隆音色；账号没克隆过时列表为空，补上系统预置音色作兜底。
-        if not voices:
-            voices = _COSYVOICE2_SYSTEM_VOICES
         return {"voices": voices}
     except Exception as e:
         return {"voices": [], "error": str(e)}

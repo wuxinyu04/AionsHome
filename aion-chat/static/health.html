@@ -68,6 +68,8 @@
 .vital-unit { color: var(--text3); font-size: 11px; margin-left: 2px; }
 .sleep-box { margin-top: 8px; background: #f6f8ff; border: 1px solid #e3e8fb; border-radius: 8px; padding: 10px; }
 .sleep-main { display: flex; justify-content: space-between; gap: 10px; align-items: center; }
+.sleep-actions { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
+.sleep-actions .action-btn { padding: 7px 10px; font-size: 12px; }
 .sleep-total { font-size: 22px; font-weight: 800; color: var(--health3); }
 .sleep-meta { margin-top: 7px; color: var(--text2); font-size: 12px; line-height: 1.6; }
 .heart-auto-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 10px; padding: 9px 10px; background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; }
@@ -127,6 +129,8 @@
 @media (max-width: 460px) {
   .ring-actions, .inline-form, .body-summary-grid { grid-template-columns: 1fr; }
   .heart-auto-row { align-items: stretch; flex-direction: column; }
+  .sleep-main { align-items: stretch; }
+  .sleep-actions { align-items: flex-start; }
   .vital-value { font-size: 21px; }
   .day-cell { min-height: 48px; padding: 4px; }
 }
@@ -316,7 +320,7 @@
         <div class="heart-auto-row">
           <div>
             <div class="vital-label">自动心率</div>
-            <div class="muted" id="hrAutoStatus">连接戒指后每10分钟检测一次</div>
+            <div class="muted" id="hrAutoStatus">戒指每10分钟自动检测，连接后同步新数据</div>
           </div>
           <button class="action-btn primary" id="btnMeasureHrNow" type="button" onclick="measureHeartRateNow()">立即测一次</button>
         </div>
@@ -335,7 +339,10 @@
               <div class="vital-label">最近睡眠</div>
               <div class="sleep-total" id="sleepTotal">--</div>
             </div>
-            <div class="muted" id="sleepRange">暂无数据</div>
+            <div class="sleep-actions">
+              <div class="muted" id="sleepRange">暂无数据</div>
+              <button class="action-btn primary" id="btnSyncSleep" type="button" onclick="syncRingSleepHistory()">同步睡眠</button>
+            </div>
           </div>
           <div class="sleep-meta" id="sleepMeta">深睡 -- · 浅睡 -- · REM -- · 清醒 --</div>
         </div>
@@ -451,7 +458,6 @@ const HEALTH_HISTORY_TIMEOUT_MS = 120000;
 const HEALTH_ACCUMULATE_TIMEOUT_MS = 5000;
 const HEART_MEASURE_TYPE = 0;
 const HEART_MONITOR_INTERVAL_MIN = 10;
-const HEART_AUTO_INTERVAL_MS = HEART_MONITOR_INTERVAL_MIN * 60 * 1000;
 const HEART_MEASURE_SETTLE_MS = 5000;
 const HEART_MEASURE_MAX_MS = 30000;
 
@@ -468,8 +474,6 @@ let syncing = false;
 let autoSyncKey = '';
 let ringDeviceName = '';
 let heartMeasure = null;
-let heartAutoTimer = null;
-let heartAutoKickTimer = null;
 let ringReconnectTimer = null;
 const HEART_CONFIG_INPUTS = [
   ['sleep_low_max', 'heartSleepLowMax'],
@@ -606,7 +610,7 @@ function setRingConnected(on, name = '') {
   $('ringDot').classList.toggle('on', isConnected);
   $('ringStatus').textContent = isConnected ? `已连接${name ? ': ' + name : ''}` : '未连接';
   $('btnConnect').textContent = isConnected ? '断开' : '连接';
-  updateHeartAutoStatus(isConnected ? '等待戒指初始化完成' : '连接戒指后每10分钟检测一次');
+  updateHeartAutoStatus(isConnected ? '等待戒指初始化完成' : '连接后自动同步新数据；需要立即测可手动点');
 }
 function setBusy(id, busy, text) {
   const btn = $(id);
@@ -843,7 +847,12 @@ async function deviceInitHandshake() {
   deviceReady = true;
   logRing('设备初始化完成');
   await configureHeartMonitor10Min();
-  startHeartAutoLoop(true);
+  startHeartAutoLoop(false);
+  try {
+    await syncRingHistory(true);
+  } catch (e) {
+    logRing('连接后自动同步失败: ' + (e.message || e));
+  }
 }
 
 function updateHeartAutoStatus(text) {
@@ -864,38 +873,17 @@ async function configureHeartMonitor10Min() {
 function startHeartAutoLoop(runSoon = false) {
   stopHeartAutoLoop(false);
   if (!isConnected || !deviceReady) return;
-  updateHeartAutoStatus(`已开启：每${HEART_MONITOR_INTERVAL_MIN}分钟检测并上传`);
-  if (runSoon) {
-    heartAutoKickTimer = setTimeout(() => {
-      runHeartAutoMeasurement('auto-connect');
-    }, 1800);
-  }
-  heartAutoTimer = setInterval(() => {
-    runHeartAutoMeasurement('auto-10min');
-  }, HEART_AUTO_INTERVAL_MS);
+  updateHeartAutoStatus(`戒指已开启每${HEART_MONITOR_INTERVAL_MIN}分钟自动检测；连接后自动同步新数据`);
 }
 
 function stopHeartAutoLoop(update = true) {
-  if (heartAutoTimer) {
-    clearInterval(heartAutoTimer);
-    heartAutoTimer = null;
-  }
-  if (heartAutoKickTimer) {
-    clearTimeout(heartAutoKickTimer);
-    heartAutoKickTimer = null;
-  }
   if (heartMeasure) {
     clearTimeout(heartMeasure.settleTimer);
     clearTimeout(heartMeasure.maxTimer);
     heartMeasure.resolve(null);
     heartMeasure = null;
   }
-  if (update) updateHeartAutoStatus('连接戒指后每10分钟检测一次');
-}
-
-async function runHeartAutoMeasurement(source) {
-  if (!isConnected || !deviceReady || syncing || heartMeasure) return null;
-  return startHeartMeasurement(source);
+  if (update) updateHeartAutoStatus('连接后自动同步新数据；需要立即测可手动点');
 }
 
 async function measureHeartRateNow() {
@@ -1037,16 +1025,7 @@ async function syncRingHistory(auto = false) {
   setBusy('btnSync', true, '同步中...');
   historyData = {};
   try {
-    const types = [
-      [DT_HEALTH_HEART, '心率'],
-      ...(auto ? [] : [
-        [DT_HEALTH_SLEEP, '睡眠'],
-        [DT_HEALTH_BLOOD, '血压'],
-        [DT_HEALTH_ALL, '综合'],
-        [DT_HEALTH_SPO2, '血氧'],
-        [DT_HEALTH_BODY, '身体数据']
-      ])
-    ];
+    const types = [[DT_HEALTH_ALL, '综合']];
     for (const [dt, name] of types) {
       logRing(`请求${name}历史`);
       const promise = waitForResponse(dt, HEALTH_HISTORY_TIMEOUT_MS);
@@ -1055,14 +1034,10 @@ async function syncRingHistory(auto = false) {
       if (response == null) logRing(`${name}历史等待超时`);
       await sleep(350);
     }
-    if (auto) {
-      const saved = await uploadLatestHeartHistory();
-      if (!saved) logRing('没有同步到新的心率历史');
-      return;
-    }
     const payload = buildSnapshotPayload();
     if (!payload) {
-      showToast('没有同步到新数据');
+      if (auto) logRing('没有同步到新数据');
+      else showToast('没有同步到新数据');
       return;
     }
     const saved = await api('POST', '/api/health/ring/latest', payload);
@@ -1070,21 +1045,111 @@ async function syncRingHistory(auto = false) {
     renderRing(saved);
     await refreshHeartRateHistory();
     $('ringSub').textContent = '同步于 ' + new Date(saved.synced_at * 1000).toLocaleString();
-    showToast('戒指数据已同步');
+    if (auto) logRing('自动同步新数据完成');
+    else showToast('戒指数据已同步');
+  } catch (e) {
+    if (auto) logRing('自动同步新数据失败: ' + (e.message || e));
+    else showToast('戒指数据同步失败: ' + (e.message || e));
   } finally {
     syncing = false;
     setBusy('btnSync', false, '同步新数据');
   }
 }
 
-async function uploadLatestHeartHistory() {
-  const heart = latestHistoryRecord(historyData[DT_HEALTH_HEART]);
-  if (!heart || !_validHrClient(heart.hr)) return null;
-  return uploadHeartRate(heart.hr, heart.time.getTime() / 1000, 'history-heart');
+async function syncRingSleepHistory() {
+  if (syncing) return;
+  if (heartMeasure) { showToast('心率检测中，稍后再同步睡眠'); return; }
+  if (!isConnected) { showToast('请先连接戒指'); return; }
+  if (!deviceReady) { showToast('戒指还在初始化'); return; }
+  syncing = true;
+  setBusy('btnSyncSleep', true, '同步中...');
+  historyData = {};
+  try {
+    logRing('请求睡眠历史');
+    const promise = waitForResponse(DT_HEALTH_SLEEP, HEALTH_HISTORY_TIMEOUT_MS);
+    await sendPacket(DT_HEALTH_SLEEP, new Uint8Array(0));
+    const response = await promise;
+    if (response == null) {
+      logRing('睡眠历史等待超时');
+      showToast('睡眠数据同步超时');
+      return;
+    }
+    const payload = buildSleepSnapshotPayload();
+    if (!payload) {
+      showToast('没有同步到睡眠数据');
+      return;
+    }
+    const saved = await api('POST', '/api/health/ring/latest', payload);
+    healthState.ring = saved;
+    renderRing(saved);
+    $('ringSub').textContent = '睡眠同步于 ' + new Date(saved.synced_at * 1000).toLocaleString();
+    showToast('睡眠数据已同步');
+  } finally {
+    syncing = false;
+    setBusy('btnSyncSleep', false, '同步睡眠');
+  }
 }
 
 function latestHistoryRecord(list) {
   return (list && list.length) ? [...list].sort((a, b) => b.time - a.time)[0] : null;
+}
+
+function getRingDeviceName() {
+  return ringDeviceName || (bleDevice && bleDevice.name) || (healthState.ring && healthState.ring.device_name) || '';
+}
+
+function parseExistingRingRaw() {
+  const raw = healthState.ring && healthState.ring.raw_json;
+  if (!raw) return {};
+  if (typeof raw === 'object') return raw;
+  try { return JSON.parse(raw) || {}; } catch (e) { return {}; }
+}
+
+function sleepPayloadFromRecord(sleep) {
+  if (!sleep) return null;
+  return {
+    start_at: sleep.time.getTime() / 1000,
+    end_at: sleep.timeEnd.getTime() / 1000,
+    total_min: (sleep.deepMin || 0) + (sleep.lightMin || 0) + (sleep.remMin || 0),
+    deep_min: sleep.deepMin,
+    light_min: sleep.lightMin,
+    rem_min: sleep.remMin,
+    wake_min: sleep.wakeMin,
+    wake_count: sleep.wakeCount
+  };
+}
+
+function existingSleepPayload() {
+  const ring = healthState.ring || {};
+  if (!ring.sleep_start_at || !ring.sleep_end_at) return null;
+  return {
+    start_at: ring.sleep_start_at,
+    end_at: ring.sleep_end_at,
+    total_min: ring.sleep_total_min,
+    deep_min: ring.sleep_deep_min,
+    light_min: ring.sleep_light_min,
+    rem_min: ring.sleep_rem_min,
+    wake_min: ring.sleep_wake_min,
+    wake_count: ring.sleep_wake_count
+  };
+}
+
+function buildSleepSnapshotPayload() {
+  const sleep = latestHistoryRecord(historyData[DT_HEALTH_SLEEP]);
+  if (!sleep) return null;
+  const ring = healthState.ring || {};
+  const existingRaw = parseExistingRingRaw();
+  return {
+    device_name: getRingDeviceName(),
+    heart_rate: ring.heart_rate ?? null,
+    systolic_bp: ring.systolic_bp ?? null,
+    diastolic_bp: ring.diastolic_bp ?? null,
+    spo2: ring.spo2 ?? null,
+    hrv: ring.hrv ?? null,
+    measured_at: ring.measured_at || Date.now() / 1000,
+    sleep: sleepPayloadFromRecord(sleep),
+    raw: { ...existingRaw, sleep, sleep_synced_at: Date.now() / 1000 }
+  };
 }
 
 async function refreshHeartRateHistory() {
@@ -1328,22 +1393,17 @@ function buildSnapshotPayload() {
   if (!all && !heart && !blood && !spo2 && !body && !sleep) return null;
   const measuredDates = [all, heart, blood, spo2, body].filter(Boolean).map(r => r.time.getTime());
   const measuredAt = measuredDates.length ? Math.max(...measuredDates) / 1000 : Date.now() / 1000;
+  const existingRaw = parseExistingRingRaw();
   return {
-    device_name: (bleDevice && bleDevice.name) || '',
+    device_name: getRingDeviceName(),
     heart_rate: (all && all.hr) || (heart && heart.hr) || (blood && blood.hr) || null,
     systolic_bp: (all && all.sbp) || (blood && blood.sbp) || null,
     diastolic_bp: (all && all.dbp) || (blood && blood.dbp) || null,
     spo2: (all && all.spo2) || (spo2 && spo2.spo2) || null,
     hrv: (body && body.hrv) || (all && all.hrv) || null,
     measured_at: measuredAt,
-    sleep: sleep ? {
-      start_at: sleep.time.getTime() / 1000,
-      end_at: sleep.timeEnd.getTime() / 1000,
-      total_min: (sleep.deepMin || 0) + (sleep.lightMin || 0) + (sleep.remMin || 0),
-      deep_min: sleep.deepMin, light_min: sleep.lightMin, rem_min: sleep.remMin,
-      wake_min: sleep.wakeMin, wake_count: sleep.wakeCount
-    } : null,
-    raw: { all, heart, blood, spo2, body, sleep }
+    sleep: sleepPayloadFromRecord(sleep) || existingSleepPayload(),
+    raw: { ...existingRaw, all, heart, blood, spo2, body, sleep: sleep || existingRaw.sleep || null }
   };
 }
 

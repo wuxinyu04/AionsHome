@@ -17,6 +17,7 @@ from database import get_db
 from ws import manager
 from ai_providers import stream_ai, CLI_STATUS_PREFIX
 from tts import TTSStreamer, synthesize_message_tts_later
+from message_dedup import build_message_dedupe_key, reserve_message_ingress
 from chatroom import (
     send_to_connor, check_connor_online, load_chatroom_config, save_chatroom_config,
     get_chatroom_names,
@@ -46,9 +47,58 @@ from todos import process_todo_commands
 from music import search_songs, get_audio_url
 from camera import cam, CAM_CHECK_CMD
 from luckin import handle_luckin_commands, luckin_payment_attachments
+from link_preview import build_link_preview_attachments
 from song_gen import clean_song_visible_reply
+from wechat_bridge import (
+    dispatch_wechat_message,
+    process_wechat_outbound_commands,
+    record_wechat_route,
+)
+from web_search import (
+    WEB_EXTRACT_CMD_PATTERN,
+    WEB_SEARCH_CMD_PATTERN,
+    WebCommandStreamFilter,
+    clean_web_command_text,
+    format_web_system_message,
+    run_web_commands,
+)
 
 router = APIRouter(prefix="/api/chatroom", tags=["chatroom"])
+
+
+def _done_streaming_response() -> StreamingResponse:
+    async def generate():
+        if False:
+            yield ""
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+def _chatroom_msg_from_row(row) -> dict:
+    msg = dict(row)
+    try:
+        msg["attachments"] = json.loads(msg.get("attachments") or "[]") if msg.get("attachments") else []
+    except Exception:
+        msg["attachments"] = []
+    return msg
+
+
+def _dedupe_chatroom_attachments(items: list) -> list:
+    seen = set()
+    out = []
+    for item in items or []:
+        key = json.dumps(item, ensure_ascii=False, sort_keys=True) if isinstance(item, dict) else str(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(item)
+    return out
+
+
+async def _with_link_previews(content: str, attachments: list | None) -> list:
+    att_list = _dedupe_chatroom_attachments(list(attachments or []))
+    previews = await build_link_preview_attachments(content, att_list)
+    return _dedupe_chatroom_attachments(att_list + previews)
 
 TRANSFER_CMD_PATTERN = re.compile(r'\[转账(?:给([^：:]+?))?[：:]\s*(-?\d+(?:\.\d+)?)\s*元\]')
 _STRUCTURED_LINE_RE = re.compile(r"^\s*(```|[-*+]\s+|\d+[.)]\s+|[>|#]|\|)")
@@ -168,7 +218,7 @@ def _process_voice_attachments(history: list):
 async def _chatroom_sys_msg(room_id: str, text: str, _q: asyncio.Queue, after_msg_id: str = None):
     """在聊天室中插入系统消息气泡"""
     now = time.time()
-    msg_id = f"cm_{int(now * 1000)}_sys"
+    msg_id = f"cm_{time.time_ns()}_sys"
     order_atts = [{"type": "system_notice_order", "after_msg_id": after_msg_id}] if after_msg_id else []
     att_json = json.dumps(order_atts, ensure_ascii=False) if order_atts else "[]"
     async with get_db() as db:
@@ -179,6 +229,7 @@ async def _chatroom_sys_msg(room_id: str, text: str, _q: asyncio.Queue, after_ms
         await db.commit()
     msg = {"id": msg_id, "room_id": room_id, "sender": "system", "content": text, "created_at": now, "attachments": order_atts}
     await _q.put({"type": "system_msg", "message": msg})
+    await manager.broadcast({"type": "chatroom_msg_created", "data": msg})
 
 
 def _name_for_identity(identity: str) -> str:
@@ -359,6 +410,23 @@ async def _process_chatroom_commands(full_text: str, room_id: str, who: str, msg
                 except Exception as e:
                     print(f"[CHATROOM_WHISPER] 发送失败: {e}")
 
+    # ── 微信消息：隐藏本地指令，插入系统记录，并交给微信发送出口 ──
+    async def _save_wechat_system(system_text: str):
+        await _chatroom_sys_msg(room_id, system_text, _q, after_msg_id=msg_id)
+
+    full_text, wechat_messages = await process_wechat_outbound_commands(
+        full_text,
+        source_type="chatroom",
+        source_id=room_id,
+        sender=who_identity,
+        source_msg_id=msg_id,
+        save_system_message=_save_wechat_system,
+        send_wechat_message=dispatch_wechat_message,
+        record_route=record_wechat_route,
+    )
+    if wechat_messages:
+        triggered["wechat_messages"] = wechat_messages
+
     # ── 点歌 ──
     music_matches = MUSIC_CMD_PATTERN.findall(full_text)
     music_cards = []
@@ -445,6 +513,19 @@ async def _process_chatroom_commands(full_text: str, room_id: str, who: str, msg
         full_text = ACTIVITY_CHECK_PATTERN.sub("", full_text)
         await _chatroom_sys_msg(room_id, f"📊 {who_label}查看了用户动态", _q, after_msg_id=msg_id)
         triggered["activity"] = activity_n
+
+    # ── 联网搜索 / 网页读取 ──
+    web_search_matches = WEB_SEARCH_CMD_PATTERN.findall(full_text)
+    web_extract_matches = WEB_EXTRACT_CMD_PATTERN.findall(full_text)
+    if web_search_matches or web_extract_matches:
+        full_text = clean_web_command_text(full_text)
+        await _chatroom_sys_msg(
+            room_id,
+            format_web_system_message(who_label, web_search_matches, web_extract_matches),
+            _q,
+            after_msg_id=msg_id,
+        )
+        triggered["web_search"] = {"searches": web_search_matches, "extracts": web_extract_matches}
 
     # ── MOMENT (朋友圈) ──
     moment_matches = MOMENT_CMD_PATTERN.findall(full_text)
@@ -677,6 +758,8 @@ def _fire_chatroom_followups(triggered: dict, room_id: str, sender: str, model_k
         asyncio.create_task(_chatroom_activity_check(room_id, sender, model_key, triggered["activity"]))
     if triggered.get("poi"):
         asyncio.create_task(_chatroom_poi_check(room_id, sender, model_key, triggered["poi"]))
+    if triggered.get("web_search"):
+        asyncio.create_task(_chatroom_web_search(room_id, sender, model_key, triggered["web_search"]))
     if triggered.get("image_gen"):
         ig = triggered["image_gen"]
         asyncio.create_task(_chatroom_image_gen(room_id, sender, ig["prompt"], ig["is_selfie"]))
@@ -770,8 +853,17 @@ async def _chatroom_cam_check(room_id: str, sender: str, model_key: str, delay: 
         await _save_msg(room_id, "system", "监控画面已获取，但模型没有返回分析结果。", auto_tts=False)
         return
 
+    from schedule import _process_background_reply_commands
+    reply_msg_id = f"cm_{time.time_ns()}_{sender[:1]}"
+    full_text = await _process_background_reply_commands(
+        full_text,
+        target={"type": "chatroom", "room_id": room_id},
+        conv_id=None,
+        sender=sender,
+        ai_msg_id=reply_msg_id,
+    )
     full_text = _normalize_cli_bubble_breaks(_visible_chatroom_text(full_text), model_key)
-    await _save_msg(room_id, sender, full_text)
+    await _save_msg(room_id, sender, full_text, msg_id=reply_msg_id)
     print(f"[CHATROOM_CAM_CHECK] {sender} 查看监控完成, room={room_id}")
 
 
@@ -830,8 +922,17 @@ async def _chatroom_activity_check(room_id: str, sender: str, model_key: str, n:
     if not full_text.strip():
         return
 
+    from schedule import _process_background_reply_commands
+    reply_msg_id = f"cm_{time.time_ns()}_{sender[:1]}"
+    full_text = await _process_background_reply_commands(
+        full_text,
+        target={"type": "chatroom", "room_id": room_id},
+        conv_id=None,
+        sender=sender,
+        ai_msg_id=reply_msg_id,
+    )
     full_text = _normalize_cli_bubble_breaks(_visible_chatroom_text(full_text), model_key)
-    await _save_msg(room_id, sender, full_text)
+    await _save_msg(room_id, sender, full_text, msg_id=reply_msg_id)
     print(f"[CHATROOM_ACTIVITY] {sender} 查看动态完成, room={room_id}, n={n}")
 
 
@@ -937,10 +1038,96 @@ async def _chatroom_poi_check(room_id: str, sender: str, model_key: str, categor
     if not full_text.strip():
         return
 
+    from schedule import _process_background_reply_commands
+    reply_msg_id = f"cm_{time.time_ns()}_{sender[:1]}"
+    full_text = await _process_background_reply_commands(
+        full_text,
+        target={"type": "chatroom", "room_id": room_id},
+        conv_id=None,
+        sender=sender,
+        ai_msg_id=reply_msg_id,
+    )
     full_text = _normalize_cli_bubble_breaks(_visible_chatroom_text(full_text), model_key)
-    await _save_msg(room_id, sender, full_text)
+    await _save_msg(room_id, sender, full_text, msg_id=reply_msg_id)
     searched_cats = "、".join(c.strip() for c in categories)
     print(f"[CHATROOM_POI] {sender} 搜索完成, room={room_id}, categories={searched_cats}")
+
+
+async def _chatroom_web_search(room_id: str, sender: str, model_key: str, payload: dict):
+    """聊天室版联网搜索：Tavily 搜索/读取网页 → 触发者追加回复到聊天室"""
+    from config import load_worldbook, SETTINGS
+
+    searches = payload.get("searches") or []
+    extracts = payload.get("extracts") or []
+    if not searches and not extracts:
+        return
+
+    try:
+        context_items = await run_web_commands(searches, extracts)
+        web_context = "\n\n".join(item for item in context_items if item.strip()).strip()
+    except Exception as e:
+        web_context = f"【联网搜索结果】\n系统搜索失败：{e}"
+
+    if not web_context:
+        web_context = "【联网搜索结果】\n系统没有拿到可用结果。"
+
+    wb = load_worldbook()
+    user_name = wb.get("user_name", "用户")
+    ai_name = wb.get("ai_name", "AI")
+    sender_label = _name_for_identity(sender)
+
+    _, msgs = await _load_room_and_messages(room_id, limit=10)
+    recent = _render_recent_room_messages_for_ai(msgs)
+
+    prefix_msgs = []
+    if wb.get("ai_persona") and sender == "aion":
+        prefix_msgs.append({"role": "user", "content": f"[系统设定 - {ai_name}人设]\n{wb['ai_persona']}"})
+        prefix_msgs.append({"role": "assistant", "content": "收到，我会按照设定扮演角色。"})
+    if wb.get("user_persona"):
+        prefix_msgs.append({"role": "user", "content": f"[系统设定 - {user_name}信息]\n{wb['user_persona']}"})
+        prefix_msgs.append({"role": "assistant", "content": "收到，我会记住你的信息。"})
+
+    web_prompt = (
+        f"{sender_label}刚才为了回答{user_name}发起了联网搜索或网页读取，系统已经完成。以下是结果：\n\n"
+        f"{web_context}\n\n"
+        f"请以{sender_label}自己的口吻，根据这些结果自然回答{user_name}。如果信息不足，请说明不足；不要编造来源。"
+        f"除非确实必须继续核实，否则不要再次输出 [WEB_SEARCH:...] 或 [WEB_EXTRACT:...]。"
+    )
+    messages = prefix_msgs + recent + [{"role": "user", "content": web_prompt}]
+
+    full_text = ""
+    try:
+        if sender == "aion":
+            _temp = SETTINGS.get("temperature")
+            async for chunk in stream_ai(messages, model_key, temperature=_temp):
+                if chunk.startswith(CLI_STATUS_PREFIX):
+                    continue
+                full_text += chunk
+        else:
+            async for chunk in _stream_connor_model(messages, model_key):
+                if chunk.startswith(CLI_STATUS_PREFIX):
+                    continue
+                full_text += chunk
+    except Exception as e:
+        full_text = f"[联网搜索完成但回复生成失败] {e}"
+
+    if not full_text.strip():
+        return
+
+    from schedule import _process_background_reply_commands
+    reply_msg_id = f"cm_{time.time_ns()}_{sender[:1]}"
+    full_text = await _process_background_reply_commands(
+        full_text,
+        target={"type": "chatroom", "room_id": room_id},
+        conv_id=None,
+        sender=sender,
+        ai_msg_id=reply_msg_id,
+    )
+    full_text = _normalize_cli_bubble_breaks(_visible_chatroom_text(clean_web_command_text(full_text)), model_key)
+    if not full_text.strip():
+        return
+    await _save_msg(room_id, sender, full_text, msg_id=reply_msg_id)
+    print(f"[CHATROOM_WEB_SEARCH] {sender} 搜索完成, room={room_id}, searches={len(searches)}, extracts={len(extracts)}")
 
 
 async def _chatroom_image_gen(room_id: str, sender: str, prompt: str, is_selfie: bool):
@@ -948,7 +1135,7 @@ async def _chatroom_image_gen(room_id: str, sender: str, prompt: str, is_selfie:
     from image_gen import generate_image
 
     try:
-        filename = await generate_image(prompt, is_selfie=is_selfie)
+        filename = await generate_image(prompt, is_selfie=is_selfie, source_identity=sender)
         if filename:
             await _save_msg(room_id, sender, "", attachments=[f"/uploads/{filename}"])
             print(f"[CHATROOM_IMG_GEN] {sender} 生图完成, room={room_id}")
@@ -1092,7 +1279,7 @@ async def _stream_connor_model(messages: list[dict], model_key: str | None = Non
     """Connor 默认走 Codex CLI；选择其他模型时复用统一模型线路。"""
     key = _resolve_connor_model(model_key)
     if key == "Codex":
-        async for chunk in stream_connor_cli(messages=messages):
+        async for chunk in stream_connor_cli(messages=messages, meta=meta):
             yield chunk
     else:
         async for chunk in stream_ai(messages, key, meta if meta is not None else {}):
@@ -2074,20 +2261,57 @@ async def _save_msg(
     *,
     auto_tts: bool = True,
     reasoning_content: str = "",
+    dedupe_key: str | None = None,
+    dedupe_target_type: str = "chatroom",
+    dedupe_target_id: str = "",
 ) -> dict:
     """保存消息到数据库"""
     now = time.time()
     if not msg_id:
         msg_id = f"cm_{int(now * 1000)}_{sender[:1]}"
     att_list = attachments or []
+    if sender != "system":
+        att_list = await _with_link_previews(content, att_list)
+    else:
+        att_list = _dedupe_chatroom_attachments(list(att_list))
     att_json = json.dumps(att_list, ensure_ascii=False) if att_list else "[]"
+    duplicate_msg = None
     async with get_db() as db:
-        await db.execute(
-            "INSERT INTO chatroom_messages (id, room_id, sender, content, attachments, reasoning_content, created_at) VALUES (?,?,?,?,?,?,?)",
-            (msg_id, room_id, sender, content, att_json, reasoning_content, now),
-        )
-        await db.execute("UPDATE chatroom_rooms SET updated_at=? WHERE id=?", (now, room_id))
+        db.row_factory = aiosqlite.Row
+        if dedupe_key:
+            duplicate = await reserve_message_ingress(
+                db,
+                dedupe_key=dedupe_key,
+                target_type=dedupe_target_type,
+                target_id=dedupe_target_id or room_id,
+                message_id=msg_id,
+                now=now,
+            )
+            if duplicate:
+                cur = await db.execute("SELECT * FROM chatroom_messages WHERE id=?", (duplicate.get("message_id", ""),))
+                row = await cur.fetchone()
+                if row:
+                    duplicate_msg = _chatroom_msg_from_row(row)
+                    duplicate_msg["duplicate"] = True
+                else:
+                    await db.execute("DELETE FROM message_ingress_dedupe WHERE dedupe_key=?", (dedupe_key,))
+                    duplicate = await reserve_message_ingress(
+                        db,
+                        dedupe_key=dedupe_key,
+                        target_type=dedupe_target_type,
+                        target_id=dedupe_target_id or room_id,
+                        message_id=msg_id,
+                        now=now,
+                    )
+        if not duplicate_msg:
+            await db.execute(
+                "INSERT INTO chatroom_messages (id, room_id, sender, content, attachments, reasoning_content, created_at) VALUES (?,?,?,?,?,?,?)",
+                (msg_id, room_id, sender, content, att_json, reasoning_content, now),
+            )
+            await db.execute("UPDATE chatroom_rooms SET updated_at=? WHERE id=?", (now, room_id))
         await db.commit()
+    if duplicate_msg:
+        return duplicate_msg
     msg = {"id": msg_id, "room_id": room_id, "sender": sender, "content": content,
            "created_at": now, "attachments": att_list, "reasoning_content": reasoning_content}
     await manager.broadcast({"type": "chatroom_msg_created", "data": msg})
@@ -2141,7 +2365,27 @@ async def send_message(room_id: str, body: MsgSend):
 
     # 保存用户消息（语音消息保存完整附件元数据）
     save_atts = body.voice_attachments if body.voice_attachments else body.attachments
-    user_msg = await _save_msg(room_id, "user", body.content, attachments=save_atts)
+    dedupe_key = build_message_dedupe_key(
+        target_type="chatroom",
+        target_id=room_id,
+        sender="user",
+        content=body.content,
+        attachments=save_atts,
+    )
+    user_msg = await _save_msg(
+        room_id,
+        "user",
+        body.content,
+        attachments=save_atts,
+        dedupe_key=dedupe_key,
+        dedupe_target_type="chatroom",
+        dedupe_target_id=room_id,
+    )
+    if user_msg.get("duplicate"):
+        duplicate_data = dict(user_msg)
+        duplicate_data.pop("duplicate", None)
+        await manager.broadcast({"type": "chatroom_msg_created", "data": duplicate_data})
+        return _done_streaming_response()
 
     # 检测用户消息中的 [转账给XXX：N元] 或 [转账：N元] → 根据收款人路由到对应钱包
     if body.content:
@@ -2607,6 +2851,7 @@ async def _generate_connor_reply(room_id, room, msgs, _q, context_limit, *, conn
     has_error = False
     error_text = None
     usage_meta: dict = {}
+    web_stream_filter = WebCommandStreamFilter()
     try:
         async for chunk in _stream_connor_model(connor_messages, connor_model_key, usage_meta):
             if chunk.startswith(CLI_STATUS_PREFIX):
@@ -2614,7 +2859,12 @@ async def _generate_connor_reply(room_id, room, msgs, _q, context_limit, *, conn
                 continue
             has_reply = True
             full_text += chunk
-            await _q.put({"type": "connor_chunk", "content": chunk})
+            visible_chunk = web_stream_filter.feed(chunk)
+            if visible_chunk:
+                await _q.put({"type": "connor_chunk", "content": visible_chunk})
+        visible_tail = web_stream_filter.flush()
+        if visible_tail:
+            await _q.put({"type": "connor_chunk", "content": visible_tail})
     except Exception as e:
         has_error = True
         error_text = str(e)
@@ -2753,13 +3003,19 @@ async def _reply_aion(room_id, msgs, context_limit, query_text, model_key, _q, *
     has_error = False
     error_text = None
     usage_meta: dict = {}
+    web_stream_filter = WebCommandStreamFilter()
     try:
         async for chunk in stream_ai(aion_history, model_key, usage_meta):
             if chunk.startswith(CLI_STATUS_PREFIX):
                 await _q.put({"type": "aion_status", "text": chunk[len(CLI_STATUS_PREFIX):]})
                 continue
             full_text += chunk
-            await _q.put({"type": "aion_chunk", "content": chunk})
+            visible_chunk = web_stream_filter.feed(chunk)
+            if visible_chunk:
+                await _q.put({"type": "aion_chunk", "content": visible_chunk})
+        visible_tail = web_stream_filter.flush()
+        if visible_tail:
+            await _q.put({"type": "aion_chunk", "content": visible_tail})
     except Exception as e:
         has_error = True
         error_text = str(e)
@@ -2827,13 +3083,19 @@ async def _reply_connor(room_id, msgs, context_limit, query_text, _q, *, connor_
     has_error = False
     error_text = None
     usage_meta: dict = {}
+    web_stream_filter = WebCommandStreamFilter()
     try:
         async for chunk in _stream_connor_model(connor_history, connor_model_key, usage_meta):
             if chunk.startswith(CLI_STATUS_PREFIX):
                 await _q.put({"type": "connor_status", "text": chunk[len(CLI_STATUS_PREFIX):]})
                 continue
             full_text += chunk
-            await _q.put({"type": "connor_chunk", "content": chunk})
+            visible_chunk = web_stream_filter.feed(chunk)
+            if visible_chunk:
+                await _q.put({"type": "connor_chunk", "content": visible_chunk})
+        visible_tail = web_stream_filter.flush()
+        if visible_tail:
+            await _q.put({"type": "connor_chunk", "content": visible_tail})
     except Exception as e:
         has_error = True
         error_text = str(e)

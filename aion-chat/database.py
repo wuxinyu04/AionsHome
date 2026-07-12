@@ -5,6 +5,7 @@
 import aiosqlite
 from contextlib import asynccontextmanager
 from config import DB_PATH
+from message_dedup import ensure_message_ingress_dedupe_table
 
 
 async def init_db():
@@ -57,6 +58,7 @@ async def init_db():
         await db.execute("CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(created_at DESC)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_messages_ai_feedback ON messages(ai_feedback_updated_at)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_conversations_updated ON conversations(updated_at DESC)")
+        await ensure_message_ingress_dedupe_table(db)
         await db.execute("""
             CREATE TABLE IF NOT EXISTS memories (
                 id TEXT PRIMARY KEY,

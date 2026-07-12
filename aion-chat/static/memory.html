@@ -19,9 +19,16 @@
 .mem-entry { padding:8px 10px; border-bottom:1px solid var(--border); font-size:13px; line-height:1.5; display:flex; align-items:flex-start; gap:8px; }
 .mem-entry:last-child { border-bottom:none; }
 .mem-entry.mem-return-focus { background:rgba(74,144,226,0.12); }
-.mem-type { font-size:10px; padding:2px 6px; border-radius:4px; background:var(--surface2); color:var(--accent); white-space:nowrap; flex-shrink:0; margin-top:2px; }
+.mem-type { font-size:10px; padding:2px 6px; border-radius:4px; background:var(--surface2); color:var(--accent); white-space:nowrap; flex-shrink:0; margin-top:2px; border:none; cursor:pointer; font-family:inherit; line-height:1.4; }
 .mem-type.kind-daily { color:#2e7d32; }
 .mem-type.kind-long-term { color:#c45a24; }
+.mem-type:hover { filter:brightness(1.08); }
+.mem-type:disabled { opacity:0.55; cursor:wait; }
+.mem-kind-wrap { position:relative; display:flex; flex-direction:column; align-items:center; }
+.mem-kind-menu { position:absolute; top:100%; left:0; z-index:6; min-width:74px; margin-top:4px; padding:4px; border:1px solid var(--border); border-radius:6px; background:var(--surface); box-shadow:0 8px 24px rgba(0,0,0,0.18); }
+.mem-kind-menu button { display:block; width:100%; border:none; border-radius:4px; background:transparent; color:var(--text2); padding:5px 8px; font-size:12px; line-height:1.2; text-align:left; cursor:pointer; white-space:nowrap; font-family:inherit; }
+.mem-kind-menu button:hover { background:var(--surface2); color:var(--text); }
+.mem-kind-menu button.active { background:rgba(126,87,194,0.16); color:var(--accent); font-weight:700; }
 .mem-left { display:flex; flex-direction:column; align-items:center; gap:3px; flex-shrink:0; margin-top:2px; }
 .mem-imp { font-size:10px; color:var(--text3); font-weight:600; }
 .mem-meta { display:flex; align-items:center; gap:6px; margin-top:3px; flex-wrap:wrap; }
@@ -225,6 +232,7 @@ let _sourceMemId = null;
 let _sourceMessages = [];
 let _dailyCompressReview = null;
 let _memoryKindFilter = "all";
+let _memoryKindMenuId = null;
 
 function memoryKind(m) {
   return m.memory_kind || (SUMMARY_MEMORY_TYPES.has(String(m.type || '').toLowerCase()) ? 'daily' : 'long_term');
@@ -256,6 +264,12 @@ function typeForMemoryKind(currentType, selectedKind) {
   if (selectedKind === 'daily') return isDaily ? (currentType || 'daily') : 'daily';
   return isDaily ? 'important' : (currentType || 'important');
 }
+
+document.addEventListener("click", () => {
+  if (!_memoryKindMenuId) return;
+  _memoryKindMenuId = null;
+  renderMemories();
+});
 
 connectCommonWS(msg => {
   if (msg.type === "memory_added") {
@@ -313,7 +327,13 @@ function renderMemories() {
   el.innerHTML = filtered.map(m => {
     const typeLabel = MEM_TYPE_LABELS[m.type] || m.type;
     const kindLabel = memoryKindLabel(m);
-    const kindClass = memoryKind(m) === 'daily' ? 'kind-daily' : 'kind-long-term';
+    const curKind = memoryKind(m);
+    const kindClass = curKind === 'daily' ? 'kind-daily' : 'kind-long-term';
+    const menuOpen = _memoryKindMenuId === m.id;
+    const kindMenu = menuOpen ? `<div class="mem-kind-menu" onclick="event.stopPropagation()">
+      <button class="${curKind === 'long_term' ? 'active' : ''}" onclick="selectMemoryKind('${escHtml(m.id)}','long_term',event)">长期重要</button>
+      <button class="${curKind === 'daily' ? 'active' : ''}" onclick="selectMemoryKind('${escHtml(m.id)}','daily',event)">日常</button>
+    </div>` : '';
     const timeStr = fmtMemoryOccurrence(m);
     const hasSource = Number(m.source_count || 0) > 0;
     const sourceBtn = hasSource ? `<button class="mem-source-btn" onclick="viewSource('${escHtml(m.id)}')" title="查看原文">📜</button>` : '';
@@ -325,7 +345,7 @@ function renderMemories() {
     const impDisplay = m.importance != null ? `<span class="mem-imp" title="重要度">${Number(m.importance).toFixed(1)}</span>` : '';
     const pinClass = m.unresolved ? 'mem-pin active' : 'mem-pin';
     return `<div class="mem-entry${m.unresolved ? ' mem-unresolved' : ''}" data-id="${escHtml(m.id)}">
-      <div class="mem-left"><span class="mem-type ${kindClass}" title="${escHtml(typeLabel)}">${escHtml(kindLabel)}</span>${impDisplay}</div>
+      <div class="mem-left"><div class="mem-kind-wrap"><button class="mem-type ${kindClass}" onclick="openMemoryKindMenu('${escHtml(m.id)}', event)" title="当前类型：${escHtml(typeLabel)}；点击选择标签" aria-label="选择记忆标签">${escHtml(kindLabel)}</button>${kindMenu}</div>${impDisplay}</div>
       <div style="flex:1;min-width:0">
         <div class="mem-content" id="mc_${escHtml(m.id)}">${escHtml(m.content)}</div>
         <div class="mem-meta">${kwDisplay}${timeStr ? `<span class="mem-time">${escHtml(timeStr)}</span>` : ''}</div>
@@ -447,6 +467,57 @@ async function toggleUnresolved(id) {
     if (mem) mem.unresolved = result.unresolved;
     renderMemories();
   } catch(e) { alert("切换失败"); }
+}
+
+function openMemoryKindMenu(id, event) {
+  if (event) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
+  _memoryKindMenuId = _memoryKindMenuId === id ? null : id;
+  renderMemories();
+  restoreMemoryPosition(id);
+}
+
+async function selectMemoryKind(id, nextKind, event) {
+  if (event) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
+  const mem = _allMemories.find(m => m.id === id);
+  if (!mem) return;
+  if (memoryKind(mem) === nextKind) {
+    _memoryKindMenuId = null;
+    renderMemories();
+    restoreMemoryPosition(id);
+    return;
+  }
+  const prev = {
+    type: mem.type,
+    memory_kind: mem.memory_kind,
+    memory_kind_label: mem.memory_kind_label,
+  };
+  const nextType = typeForMemoryKind(mem.type, nextKind);
+  mem.type = nextType;
+  mem.memory_kind = nextKind;
+  mem.memory_kind_label = nextKind === 'daily' ? '日常' : '长期重要';
+  _memoryKindMenuId = null;
+  renderMemories();
+  restoreMemoryPosition(id);
+  try {
+    const result = await api("PATCH", `/api/memories/${id}/kind`, { memory_kind: nextKind });
+    if (!result?.ok) throw new Error(result?.message || "切换失败");
+    mem.type = result.type || nextType;
+    mem.memory_kind = result.memory_kind || nextKind;
+    mem.memory_kind_label = result.memory_kind_label || mem.memory_kind_label;
+    renderMemories();
+    restoreMemoryPosition(id);
+  } catch(e) {
+    Object.assign(mem, prev);
+    renderMemories();
+    restoreMemoryPosition(id);
+    alert("切换标签失败");
+  }
 }
 
 async function addMemory() {

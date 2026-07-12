@@ -10,6 +10,7 @@ import aiosqlite, httpx
 
 from config import DATA_DIR, DEFAULT_MODEL, MODELS, load_worldbook
 from database import get_db
+from model_json import extract_json_object
 from memory import (
     get_embedding, cosine_similarity, _pack_embedding, _unpack_embedding, _keyword_match_score,
     _memory_time_payload, _format_raw_evidence_block,
@@ -249,7 +250,7 @@ def _build_connor_messages(prompt: str) -> list[dict]:
     return messages
 
 
-async def stream_connor_cli(prompt: str = None, *, messages: list[dict] = None):
+async def stream_connor_cli(prompt: str = None, *, messages: list[dict] = None, meta: dict | None = None):
     """流式调用 Codex CLI 获取 Connor 回复，yield text chunks 和 CLI_STATUS_PREFIX 状态。
     可传入纯文本 prompt（旧方式）或完整 messages 列表（保留附件图片）。"""
     if messages is None:
@@ -261,7 +262,7 @@ async def stream_connor_cli(prompt: str = None, *, messages: list[dict] = None):
             if persona:
                 messages = [{"role": "system", "content": persona}] + messages
     codex_model = (MODELS.get("Codex") or {}).get("model", "")
-    async for chunk in call_codex_cli(messages, codex_model, None):
+    async for chunk in call_codex_cli(messages, codex_model, meta):
         yield chunk
 
 
@@ -967,7 +968,10 @@ async def digest_chatroom(room_id: str = None, model_key: str = None, allow_ai_w
 
 def _parse_digest_result(raw: str) -> Optional[dict]:
     """解析 AI 总结结果的 JSON"""
-    raw = raw.strip()
+    data = extract_json_object(raw)
+    if data is not None:
+        return data
+    raw = (raw or "").strip()
     if "```" in raw:
         start = raw.find("{")
         end = raw.rfind("}") + 1
@@ -1047,7 +1051,7 @@ async def build_aion_group_context(
 
     # 4. 记忆召回（使用共享模块，Aion 读主记忆库 + 聊天室记忆）
     async def _chatroom_recall(query, keywords):
-        return await recall_chatroom_memories(query, room_id, "group", keywords, top_k=3)
+        return await recall_chatroom_memories(query, room_id, "group", keywords, top_k=5, min_results=3)
 
     mem_result = await build_memory_blocks(
         query_text,
@@ -1055,6 +1059,7 @@ async def build_aion_group_context(
         use_main_memories=True,
         chatroom_recall_fn=_chatroom_recall,
         digest_result=digest_result,
+        always_include_recalled=True,
     )
 
     history.append({"role": "user", "content": mem_result["time_block"]})
