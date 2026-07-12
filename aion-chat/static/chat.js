@@ -243,8 +243,7 @@ function formatMsg(s) {
   });
 
   // 3. MD 渲染
-  let html = window.marked ? marked.parse(processed) : processed.replace(/
-/g, '<br>');
+  let html = window.marked ? marked.parse(processed) : processed.replace(/\n/g, '<br>');
 
   // 4. 占位还原
   html = html.replace(/<!--AIONBLOCK(\d+)-->/g, (_, i) => blocks[+i] || '');
