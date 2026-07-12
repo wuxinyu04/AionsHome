@@ -369,6 +369,23 @@ def _resolve_attachment_path(att: str) -> Path:
         return UPLOADS_DIR / Path(att).name
 
 
+def _attachment_ref(att) -> tuple[str, str] | None:
+    """归一化附件为 (url路径, mime提示)。
+    - 字符串附件：直接是 URL 路径，mime 提示留空由文件后缀推断。
+    - dict 附件：前端上传的图片/文件格式为 {"url": "/uploads/x.jpg", "type": "image/jpeg", "name": ...}，
+      取 url + type(mime)。type 不是真正 mime（如 voice/video_clip/music/system_notice_order）
+      或没有 url 的结构化附件返回 None 跳过（这些要么已被转写成文本，要么不是可内联的文件）。
+    """
+    if isinstance(att, str):
+        return att, ""
+    if isinstance(att, dict):
+        url = att.get("url") or ""
+        mime = att.get("type") or ""
+        if url and "/" in mime:  # type 形如 image/jpeg 才是真正的文件附件
+            return url, mime
+    return None
+
+
 def _ensure_gemini_accessible(fpath: Path) -> Path:
     """如果文件在 Connor-Codex/uploads/ 下（Gemini CLI 无权访问），
     则复制一份到 data/uploads/ 并返回新路径；否则原样返回。"""
@@ -396,9 +413,13 @@ def build_multimodal_messages(history: list):
             if m["content"]:
                 parts.append({"type": "text", "text": m["content"]})
             for att in attachments:
-                fpath = _resolve_attachment_path(att)
+                ref = _attachment_ref(att)
+                if ref is None:
+                    continue  # 结构化附件(voice/music 等)已转写或不可内联
+                url, mime_hint = ref
+                fpath = _resolve_attachment_path(url)
                 if fpath.exists():
-                    mime = mimetypes.guess_type(str(fpath))[0] or "application/octet-stream"
+                    mime = mime_hint or mimetypes.guess_type(str(fpath))[0] or "application/octet-stream"
                     b64 = base64.b64encode(fpath.read_bytes()).decode()
                     if mime.startswith("image/"):
                         parts.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
@@ -430,9 +451,13 @@ def build_gemini_contents(history: list):
             parts.append({"text": m["content"]})
         if attachments and m["role"] == "user":
             for att in attachments:
-                fpath = _resolve_attachment_path(att)
+                ref = _attachment_ref(att)
+                if ref is None:
+                    continue  # 结构化附件(voice/music 等)已转写或不可内联
+                url, mime_hint = ref
+                fpath = _resolve_attachment_path(url)
                 if fpath.exists():
-                    mime = mimetypes.guess_type(str(fpath))[0] or "image/jpeg"
+                    mime = mime_hint or mimetypes.guess_type(str(fpath))[0] or "image/jpeg"
                     b64 = base64.b64encode(fpath.read_bytes()).decode()
                     parts.append({"inline_data": {"mime_type": mime, "data": b64}})
         contents.append({"role": role, "parts": parts if parts else [{"text": m["content"]}]})
@@ -812,13 +837,15 @@ def _build_cli_prompt(messages: list, *, copy_cr_uploads: bool = False) -> str:
                 except Exception:
                     attachments = []
             for att in attachments:
-                if isinstance(att, dict):
-                    continue  # 跳过 voice/video 等结构化附件（已有 transcript 文本）
-                fpath = _resolve_attachment_path(att)
+                ref = _attachment_ref(att)
+                if ref is None:
+                    continue  # 结构化附件(voice/music 等)已转写或不可内联
+                url, mime_hint = ref
+                fpath = _resolve_attachment_path(url)
                 if copy_cr_uploads:
                     fpath = _ensure_gemini_accessible(fpath)
                 if fpath.exists():
-                    mime = mimetypes.guess_type(str(fpath))[0] or ""
+                    mime = mime_hint or mimetypes.guess_type(str(fpath))[0] or ""
                     if mime.startswith("image/"):
                         att_image_paths.append(str(fpath.resolve()))
                     elif mime.startswith("audio/"):
@@ -1826,9 +1853,13 @@ def _messages_have_images(messages: list) -> bool:
             try: atts = json.loads(atts) if atts else []
             except: atts = []
         for att in atts:
-            fpath = _resolve_attachment_path(att)
+            ref = _attachment_ref(att)
+            if ref is None:
+                continue  # 结构化附件(voice/music 等)不是图片
+            url, mime_hint = ref
+            fpath = _resolve_attachment_path(url)
             if fpath.exists():
-                mime = mimetypes.guess_type(str(fpath))[0] or ""
+                mime = mime_hint or mimetypes.guess_type(str(fpath))[0] or ""
                 if mime.startswith("image/"):
                     return True
     return False
@@ -1855,11 +1886,16 @@ async def _sentinel_describe_images(messages: list) -> list:
         img_descs = []
         non_img_atts = []
         for att in atts:
-            fpath = _resolve_attachment_path(att)
+            ref = _attachment_ref(att)
+            if ref is None:
+                non_img_atts.append(att)  # voice/music 等结构化附件原样保留
+                continue
+            url, mime_hint = ref
+            fpath = _resolve_attachment_path(url)
             if not fpath.exists():
                 non_img_atts.append(att)
                 continue
-            mime = mimetypes.guess_type(str(fpath))[0] or ""
+            mime = mime_hint or mimetypes.guess_type(str(fpath))[0] or ""
             if not mime.startswith("image/"):
                 non_img_atts.append(att)
                 continue
