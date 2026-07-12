@@ -6,7 +6,7 @@ if (-not (Test-Path "$Root\.venv\Scripts\python.exe")) {
     exit 1
 }
 
-$vbs = Join-Path $Root 'autostart_launcher.vbs'
+$vbs = Join-Path $Root 'ops\autostart\autostart_launcher.vbs'
 if (-not (Test-Path $vbs)) {
     Write-Host "[ERROR] $vbs not found" -ForegroundColor Red
     exit 1
