@@ -99,3 +99,7 @@ Thumbs.db
 # ── 头像默认备份（换头像时自动生成，每人不同） ──
 public/UserIcon.default.png
 public/AIIcon.default.png
+
+# ── 本地安装包 / 安装器不入库 ──
+*.exe
+tailscale-setup.exe
