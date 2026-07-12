@@ -226,6 +226,22 @@ function formatMsg(s) {
     reserve(`<img class="cr-inline-img" src="${escHtml(url)}" ${imageInteractionAttrs()} loading="lazy" style="max-width:100%;border-radius:8px;cursor:pointer;margin:4px 0">`)
   );
 
+  // 2c. 系统指令防御性 strip —— 兜底任何上游漏网的 [XXX:...] 标签
+  // 流式 strip 在 _processSSEStream 里也会跑，但 renderMessages / regenerate / sync 路径直接吃 m.content，
+  // 一旦存档消息里残留 [MUSIC:xxx] / [ALARM:...] 等，就会被 marked 当字面文本渲染成可见乱码。
+  // 在这里以占位抽出（空块），整段彻底消失，不影响视觉气泡。
+  // 同步 _processSSEStream 的关键词集合：缺哪个补哪个。
+  const sysCmdRe = /\[(?:MUSIC|LIKE|PLAYLIST_(?:NEW|ADD)|CAM_CHECK|POI_SEARCH|ALARM|REMINDER|Monitor|TOY|HEART|MEMORY|SCHEDULE_(?:DEL|LIST)|SELFIE|DRAW)(?:\s*:[^\]]*)?\]|\[查看动态(?::\d+)?\]|\[视频电话\]|\[SONG\][\s\S]*?\[\/SONG\]/gi;
+  processed = processed.replace(sysCmdRe, () => reserve(''));
+
+  // 2d. 兜底：AI 偶尔忘加方括号写成裸 "MUSIC:xxx"，strip 链全漏，前端裸奔一段文字 —— 直接抹掉。
+  // 仅匹配行首/换行后的裸 "KW:xxx"（要全大写关键词开头），args 只吃到换行为止（不会吃下后面正文段）。
+  const bareCmdRe = /(?:^|\n)\s*(?:MUSIC|LIKE|PLAYLIST_(?:NEW|ADD)|CAM_CHECK|POI_SEARCH|ALARM|REMINDER|Monitor|TOY|HEART|MEMORY|SCHEDULE_DEL|SELFIE|DRAW|查看动态|视频电话)\s*:\s*[^\n]+/g;
+  processed = processed.replace(bareCmdRe, (m) => {
+    const head = m.startsWith('\n') ? '\n' : '';
+    return head + reserve('');
+  });
+
   // 3. MD 渲染
   let html = window.marked ? marked.parse(processed) : processed.replace(/
 /g, '<br>');
