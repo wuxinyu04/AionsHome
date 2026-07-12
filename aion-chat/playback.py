@@ -17,6 +17,30 @@ _now_playing = None  # {song_id, name, artist, state, position, queue_count, upd
 
 _NOW_PLAYING_TTL = 300  # 5 分钟无更新视为已停止
 
+# 用户歌单列表缓存：避免每条 AI 消息都打一次网易云接口
+_pl_lock = threading.Lock()
+_playlists_cache = None  # {"uid":..., "playlists":[...], "ts":...}
+_PLAYLIST_TTL = 600  # 10 分钟
+
+
+def set_playlists_cache(uid: int, playlists: list):
+    """路由拉到歌单后刷新缓存"""
+    global _playlists_cache
+    with _pl_lock:
+        _playlists_cache = {"uid": uid, "playlists": playlists, "ts": time.time()}
+
+
+def get_playlists_cache(uid: int) -> list | None:
+    """context_builder 读缓存注入 AI 上下文（无缓存或过期返回 None，不触发网络请求）"""
+    with _pl_lock:
+        if not _playlists_cache:
+            return None
+        if _playlists_cache.get("uid") != uid:
+            return None
+        if time.time() - _playlists_cache.get("ts", 0) > _PLAYLIST_TTL:
+            return None
+        return list(_playlists_cache.get("playlists") or [])
+
 
 def set_now_playing(data: dict):
     global _now_playing

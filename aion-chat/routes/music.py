@@ -9,12 +9,31 @@ from pydantic import BaseModel
 
 import httpx
 
-from music import search_songs, get_song_detail, get_audio_url, get_lyrics
+from music import (
+    search_songs, get_song_detail, get_audio_url, get_lyrics,
+    get_user_playlists, get_playlist_tracks, get_likelist, like_track,
+    create_playlist, add_to_playlist, remove_from_playlist, find_playlist_by_name,
+)
 import playback
+from config import SETTINGS
+
+
+def _netease_uid() -> int | None:
+    uid = (SETTINGS.get("netease_uid") or "").strip()
+    if not uid:
+        return None
+    try:
+        return int(uid)
+    except (TypeError, ValueError):
+        return None
 
 router = APIRouter()
 
 MUSIC_CMD_PATTERN = re.compile(r"\[MUSIC:(.+?)\]")
+# AI 音乐管理指令：红心 / 建歌单 / 往歌单加歌
+LIKE_CMD_PATTERN = re.compile(r"\[LIKE(?::([^\]]+))?\]")            # [LIKE] 或 [LIKE:歌曲名 歌手名]
+PLAYLIST_NEW_PATTERN = re.compile(r"\[PLAYLIST_NEW:([^\]]+)\]")     # [PLAYLIST_NEW:歌单名]
+PLAYLIST_ADD_PATTERN = re.compile(r"\[PLAYLIST_ADD:([^\]]+)\]")     # [PLAYLIST_ADD:歌单名] 或 [PLAYLIST_ADD:歌单名|歌曲名]
 
 
 @router.get("/api/music/search")
@@ -100,6 +119,79 @@ async def music_shared_add(body: SharedSongRequest):
 async def music_shared_list(limit: int = Query(50, ge=1, le=500)):
     """读取"一起听过的歌"历史"""
     return {"songs": playback.get_shared(limit=limit)}
+
+
+# ── 用户曲库：歌单 / 红心 / 歌单管理 ──
+
+@router.get("/api/music/playlists")
+async def music_playlists():
+    """用户的网易云歌单列表（含「我喜欢的音乐」红心歌单，通常第一个）"""
+    uid = _netease_uid()
+    if not uid:
+        return {"error": "未配置 netease_uid（设置页填网易云 UID）"}
+    playlists = get_user_playlists(uid)
+    playback.set_playlists_cache(uid, playlists)  # 刷新缓存供 context_builder 注入
+    return {"playlists": playlists}
+
+
+@router.get("/api/music/playlist/{pid}")
+async def music_playlist_tracks(pid: int):
+    """歌单的全部曲目"""
+    return {"songs": get_playlist_tracks(pid)}
+
+
+@router.get("/api/music/favorites")
+async def music_favorites():
+    """红心歌单「我喜欢的音乐」的曲目"""
+    uid = _netease_uid()
+    if not uid:
+        return {"error": "未配置 netease_uid"}
+    return {"songs": get_likelist(uid)}
+
+
+@router.post("/api/music/like/{song_id}")
+async def music_like(song_id: int, like: bool = True):
+    """红心 / 取消红心"""
+    ok = like_track(song_id, like)
+    return {"ok": ok, "liked": like}
+
+
+class PlaylistCreateReq(BaseModel):
+    name: str
+
+
+@router.post("/api/music/playlist")
+async def music_playlist_create(body: PlaylistCreateReq):
+    """创建新歌单"""
+    return create_playlist(body.name)
+
+
+class PlaylistTracksReq(BaseModel):
+    track_ids: list[int]
+
+
+@router.post("/api/music/playlist/{pid}/add")
+async def music_playlist_add(pid: int, body: PlaylistTracksReq):
+    """往歌单加歌"""
+    add_to_playlist(pid, body.track_ids)
+    return {"ok": True}
+
+
+@router.post("/api/music/playlist/{pid}/remove")
+async def music_playlist_remove(pid: int, body: PlaylistTracksReq):
+    """从歌单删歌"""
+    remove_from_playlist(pid, body.track_ids)
+    return {"ok": True}
+
+
+@router.get("/api/music/playlist-by-name")
+async def music_playlist_by_name(name: str = Query(..., min_length=1, max_length=100)):
+    """按名查歌单（给 AI / 前端按歌单名定位）"""
+    uid = _netease_uid()
+    if not uid:
+        return {"error": "未配置 netease_uid"}
+    p = find_playlist_by_name(uid, name)
+    return p or {"error": "歌单不存在"}
 
 
 @router.get("/api/music/stream/{song_id}")
