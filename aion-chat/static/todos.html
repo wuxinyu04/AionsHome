@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>待办清单 - Aion</title>
+<link rel="stylesheet" href="/static/common.css">
+<link rel="manifest" href="/manifest.json">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#ff8359">
+<style>
+.todo-list { border:1px solid var(--border); border-radius:8px; background:var(--bg); padding:4px; max-height:calc(100dvh - 340px); overflow-y:auto; }
+.todo-item { display:flex; align-items:flex-start; gap:8px; padding:10px 8px; border-bottom:1px solid var(--border); }
+.todo-item:last-child { border-bottom:none; }
+.todo-item.done { opacity:0.5; }
+.todo-item.done .todo-content { text-decoration:line-through; }
+.todo-check { width:20px; height:20px; flex-shrink:0; margin-top:1px; cursor:pointer; accent-color:var(--accent); }
+.todo-body { flex:1; min-width:0; }
+.todo-content { font-size:14px; color:var(--text); word-break:break-word; }
+.todo-origin { font-size:12px; color:var(--text2); font-weight:600; margin-right:4px; white-space:nowrap; }
+.todo-meta { font-size:11px; color:var(--text3); margin-top:3px; display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
+.todo-pri { font-size:10px; padding:1px 6px; border-radius:4px; }
+.todo-pri.high { background:#ffebee; color:#c62828; }
+.todo-pri.normal { background:#fff8e1; color:#f57f17; }
+.todo-pri.low { background:#f5f5f5; color:#757575; }
+.todo-cat { font-size:10px; padding:1px 6px; border-radius:4px; background:var(--surface2); color:var(--text2); }
+.todo-due { color:var(--text3); }
+.todo-del { background:none; border:none; color:var(--danger); font-size:14px; cursor:pointer; padding:4px; opacity:0.5; flex-shrink:0; }
+.todo-del:hover { opacity:1; }
+.todo-empty { padding:24px; text-align:center; color:var(--text3); font-size:14px; }
+.todo-section-title { font-size:12px; color:var(--text2); padding:8px 8px 4px; font-weight:600; }
+.todo-add-section { margin-top:12px; }
+.todo-add-section input[type="text"] { width:100%; background:var(--surface2); color:var(--text); border:1px solid var(--border); border-radius:8px; padding:8px 10px; font-size:13px; outline:none; margin-bottom:8px; box-sizing:border-box; }
+.todo-add-row { display:flex; gap:6px; align-items:center; margin-bottom:8px; }
+.todo-add-row input { flex:1; background:var(--surface2); color:var(--text); border:1px solid var(--border); border-radius:8px; padding:6px 8px; font-size:12px; outline:none; min-width:0; }
+.todo-add-row select { padding:6px 8px; border:1px solid var(--border); border-radius:8px; background:var(--surface2); color:var(--text); font-size:12px; flex-shrink:0; }
+.todo-add-btn { padding:9px 14px; border:none; border-radius:8px; background:var(--accent); color:#fff; font-size:13px; cursor:pointer; width:100%; }
+</style>
+</head>
+<body>
+<div class="sub-page">
+  <div class="top-bar">
+    <button class="back-btn" onclick="location.href='/'">⬅</button>
+    <h2>✅ 待办清单</h2>
+  </div>
+  <div class="page-content">
+    <div class="todo-list" id="todoList"><div class="todo-empty">暂无待办</div></div>
+    <div class="todo-add-section">
+      <input type="text" id="todoAddContent" placeholder="待办内容...">
+      <div class="todo-add-row">
+        <input type="text" id="todoAddCategory" placeholder="分类(可选)">
+        <input type="datetime-local" id="todoAddDue">
+        <select id="todoAddPri">
+          <option value="normal">🟡 中</option>
+          <option value="high">🔴 高</option>
+          <option value="low">⚪ 低</option>
+        </select>
+      </div>
+      <button class="todo-add-btn" onclick="addTodoManual()">添加待办</button>
+    </div>
+  </div>
+</div>
+<script src="/static/theme.js?v=theme-20260606"></script>
+<script src="/static/common.js"></script>
+<script>
+connectCommonWS(msg => {
+  if (msg.type === "todos_changed") loadTodos();
+});
+
+(async function init() {
+  await loadTodos();
+})();
+
+async function loadTodos() {
+  try {
+    const list = await api("GET", "/api/todos");
+    const el = $("todoList");
+    if (!list || !list.length) { el.innerHTML = '<div class="todo-empty">暂无待办</div>'; return; }
+    const pending = list.filter(t => t.status === "pending");
+    const done = list.filter(t => t.status === "done");
+    let html = "";
+    if (pending.length) {
+      html += '<div class="todo-section-title">待办 (' + pending.length + ')</div>';
+      html += pending.map(renderTodo).join("");
+    }
+    if (done.length) {
+      html += '<div class="todo-section-title">已完成 (' + done.length + ')</div>';
+      html += done.map(renderTodo).join("");
+    }
+    el.innerHTML = html || '<div class="todo-empty">暂无待办</div>';
+  } catch(e) { console.error("loadTodos:", e); }
+}
+
+function renderTodo(t) {
+  const priMap = {high:['🔴','高','high'], normal:['🟡','中','normal'], low:['⚪','低','low']};
+  const [pIcon, pLabel, pCls] = priMap[t.priority] || priMap.normal;
+  const originName = t.origin_name || '';
+  const originHtml = originName ? `<span class="todo-origin">【${escHtml(originName)}】</span>` : '';
+  const catHtml = t.category ? `<span class="todo-cat">${escHtml(t.category)}</span>` : '';
+  const dueHtml = t.due_at ? `<span class="todo-due">⏰ ${escHtml((t.due_at||'').replace('T',' '))}</span>` : '';
+  const checked = t.status === "done" ? "checked" : "";
+  const doneCls = t.status === "done" ? "done" : "";
+  return `<div class="todo-item ${doneCls}">
+    <input type="checkbox" class="todo-check" ${checked} onchange="toggleTodo('${t.id}','${t.status}')">
+    <div class="todo-body">
+      <div>${originHtml}<span class="todo-content">${escHtml(t.content)}</span></div>
+      <div class="todo-meta"><span class="todo-pri ${pCls}">${pIcon} ${pLabel}</span>${catHtml}${dueHtml}</div>
+    </div>
+    <button class="todo-del" onclick="deleteTodo('${t.id}')" title="删除">✕</button>
+  </div>`;
+}
+
+async function addTodoManual() {
+  const content = $("todoAddContent").value.trim();
+  if (!content) { alert("请填写待办内容"); return; }
+  const priority = $("todoAddPri").value;
+  const category = $("todoAddCategory").value.trim();
+  const due_at = $("todoAddDue").value;
+  try {
+    await api("POST", "/api/todos", { content, priority, category, due_at });
+    $("todoAddContent").value = "";
+    $("todoAddCategory").value = "";
+    $("todoAddDue").value = "";
+    loadTodos();
+    showToast("✅ 已添加");
+  } catch(e) { alert("添加失败：" + e.message); }
+}
+
+async function toggleTodo(id, status) {
+  const newStatus = status === "done" ? "pending" : "done";
+  try {
+    await api("PATCH", `/api/todos/${id}`, { status: newStatus });
+    loadTodos();
+  } catch(e) { alert("操作失败：" + e.message); }
+}
+
+async function deleteTodo(id) {
+  if (!confirm("确定删除此待办？")) return;
+  try {
+    await api("DELETE", `/api/todos/${id}`);
+    loadTodos();
+  } catch(e) { alert("删除失败：" + e.message); }
+}
+</script>
+</body>
+</html>
