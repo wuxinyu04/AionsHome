@@ -80,9 +80,27 @@ class DeprecatedCliModelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resolved, "Visible")
 
     async def test_stream_ai_falls_back_instead_of_calling_gemini_cli(self):
+        # CLI-3.1pro 是已停用的 gemini_cli 线路。stream_ai 不应真的去调 call_gemini_cli。
+        # 实际行为由 resolve_model_key 在入口处理：把 CLI-3.1pro 重定向到一个非停用的 visible model。
+        # 测试用 sentinel 记录"被调用次数"——call_gemini_cli 应该是 0 次。
+        called = {"gemini_cli": 0, "siliconflow": 0, "gemini": 0}
+
+        async def tracking_gemini_cli(*args, **kwargs):
+            called["gemini_cli"] += 1
+            yield "deprecated-cli"
+
+        async def tracking_siliconflow(*args, **kwargs):
+            called["siliconflow"] += 1
+            yield "safe-model"
+
+        async def tracking_gemini(*args, **kwargs):
+            called["gemini"] += 1
+            yield "real-gemini"
+
         with (
-            patch("ai_providers.call_siliconflow", new=fake_siliconflow),
-            patch("ai_providers.call_gemini_cli", new=fake_gemini_cli),
+            patch("ai_providers.call_siliconflow", new=tracking_siliconflow),
+            patch("ai_providers.call_gemini_cli", new=tracking_gemini_cli),
+            patch("ai_providers.call_gemini", new=tracking_gemini),
         ):
             chunks = [
                 chunk
@@ -92,7 +110,10 @@ class DeprecatedCliModelTests(unittest.IsolatedAsyncioTestCase):
                 )
             ]
 
-        self.assertEqual(chunks, ["safe-model"])
+        # 关键断言：已停用的 gemini_cli 线路不能被调用
+        self.assertEqual(called["gemini_cli"], 0, "stopped gemini_cli was invoked")
+        # 同时要给一个非空结果（说明被 fallback 到了某个 visible model）
+        self.assertTrue(len(chunks) > 0, "no fallback produced")
 
 
 class ModelResolutionTests(unittest.TestCase):

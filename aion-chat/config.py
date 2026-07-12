@@ -225,7 +225,7 @@ BUILTIN_MODELS = {
     # GPT-5.6 tiers are intentionally disabled for companion chat. Keep the
     # mappings here for a future opt-in without exposing them in the UI.
     # "Codex":          {"provider": "codex_cli",  "model": "gpt-5.6-terra", "vision": True},
-    "Codex-Sol":      {"provider": "codex_cli",  "model": "gpt-5.6-sol", "vision": True},
+    # "Codex-Sol":      {"provider": "codex_cli",  "model": "gpt-5.6-sol", "vision": True},
     # "Codex-Luna":     {"provider": "codex_cli",  "model": "gpt-5.6-luna", "vision": True},
     "CLI-3.1pro":       {"provider": "gemini_cli", "model": "gemini-3.1-pro-preview", "vision": True},
     # Antigravity 走本地 agy OAuth 会话，复用 agy 自己保存的默认模型
@@ -352,7 +352,7 @@ def refresh_custom_models() -> None:
 MODELS = {}
 refresh_custom_models()
 
-DEFAULT_MODEL = "Gemini-3.5-flash"
+DEFAULT_MODEL = "官方Gemini3.5flash"
 
 
 def is_model_deprecated(model_key: str | dict | None) -> bool:
