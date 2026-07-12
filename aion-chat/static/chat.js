@@ -4772,6 +4772,10 @@ function _pushAttachmentPlaceholder(blobOrFile) {
     localUrl,
     localId,
     type: blobOrFile.type || '',
+    progress: 0,           // 0-100，XHR upload.onprogress 更新
+    loaded: 0,
+    total: blobOrFile.size || 0,
+    _xhr: null,            // _uploadAndAttach 写入，removeAttachment 用它 abort
   });
   renderPreview();
   return localId;
@@ -4779,24 +4783,55 @@ function _pushAttachmentPlaceholder(blobOrFile) {
 function _findAttachmentIdx(localId) {
   return pendingAttachments.findIndex(a => a.localId === localId);
 }
-// 上传并原地替换占位；用户中途移除 → findIndex 返回 -1 静默忽略。
+// 上传并原地替换占位。用 XHR 而非 fetch 是因为 fetch 不暴露上传进度。
+// 用户中途移除：xhr.abort() 后 status===0，跳过失败 toast。
 function _uploadAndAttach(blobOrFile, localId, displayName) {
   const fd = new FormData();
   const name = displayName || blobOrFile.name || ('upload_' + Date.now());
   fd.append('file', blobOrFile, name);
-  return fetch('/api/upload', { method: 'POST', body: fd })
-    .then(res => res.json())
-    .then(data => {
-      if (data.error) throw new Error(data.error);
+  return new Promise((resolve) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/api/upload');
+    const idx0 = _findAttachmentIdx(localId);
+    if (idx0 >= 0) pendingAttachments[idx0]._xhr = xhr;
+    xhr.upload.onprogress = (e) => {
+      if (!e.lengthComputable) return;
       const idx = _findAttachmentIdx(localId);
       if (idx < 0) return; // 用户已点 ✕ 取消
-      const cur = pendingAttachments[idx];
-      if (cur && cur.localUrl) URL.revokeObjectURL(cur.localUrl);
-      pendingAttachments[idx] = data;
+      const item = pendingAttachments[idx];
+      if (!item) return;
+      item.progress = Math.round((e.loaded / e.total) * 100);
+      item.loaded = e.loaded;
+      item.total = e.total;
       renderPreview();
-      showUploadToast('✓ 已上传');
-    })
-    .catch(err => {
+    };
+    xhr.onload = () => {
+      if (xhr.status === 0) { resolve(); return; } // 被 abort
+      let data;
+      try { data = JSON.parse(xhr.responseText); }
+      catch (e) { data = { error: '解析失败' }; }
+      const ok = xhr.status >= 200 && xhr.status < 300 && !data.error;
+      const idx = _findAttachmentIdx(localId);
+      if (ok) {
+        if (idx < 0) { resolve(); return; }
+        const cur = pendingAttachments[idx];
+        if (cur && cur.localUrl) URL.revokeObjectURL(cur.localUrl);
+        pendingAttachments[idx] = data;
+        renderPreview();
+        showUploadToast('✓ 已上传');
+      } else {
+        if (idx >= 0) {
+          const cur = pendingAttachments[idx];
+          if (cur && cur.localUrl) URL.revokeObjectURL(cur.localUrl);
+          pendingAttachments.splice(idx, 1);
+          renderPreview();
+        }
+        showUploadToast('上传失败：' + (data.error || ('HTTP ' + xhr.status)), true);
+      }
+      resolve();
+    };
+    xhr.onerror = () => {
+      if (xhr.status === 0) { resolve(); return; } // 被 abort
       const idx = _findAttachmentIdx(localId);
       if (idx >= 0) {
         const cur = pendingAttachments[idx];
@@ -4804,19 +4839,23 @@ function _uploadAndAttach(blobOrFile, localId, displayName) {
         pendingAttachments.splice(idx, 1);
         renderPreview();
       }
-      showUploadToast('上传失败：' + (err.message || '网络错误'), true);
-    });
+      showUploadToast('上传失败：网络错误', true);
+      resolve();
+    };
+    xhr.send(fd);
+  });
 }
 
 async function handleFileSelect(input) {
   const files = Array.from(input.files);
   input.value = '';
-  // A 方案：仅加显式反馈，不改变网络并发性 → 串行上传。
-  // 占位先 push 再 renderPreview，所以无论上传多慢，用户都立刻能看到缩略图 + spinner。
-  for (const file of files) {
+  // B 方案：占位立即全 push 完，再并发上传 → 多张不再排队。
+  // send() 已有 uploading 守卫，用户中途按发送会被 toast 拦住。
+  const tasks = files.map(file => {
     const localId = _pushAttachmentPlaceholder(file);
-    await _uploadAndAttach(file, localId);
-  }
+    return _uploadAndAttach(file, localId);
+  });
+  await Promise.all(tasks);
 }
 
 // 粘贴图片到输入框
@@ -4848,13 +4887,29 @@ function renderPreview() {
     const media = isVid
       ? `<video src="${escHtml(url)}" muted></video>`
       : `<img src="${escHtml(url)}">`;
-    const spinner = isUploading ? '<div class="preview-spinner"></div>' : '';
-    return `<div class="preview-item${isUploading ? ' uploading' : ''}">${media}${spinner}<button class="preview-remove" onclick="removeAttachment(${i})">✕</button></div>`;
+    let overlay = '';
+    if (isUploading) {
+      // SVG 进度环：r=16 周长≈100.53，dasharray 跟着 progress 走
+      const pct = Math.max(0, Math.min(100, a.progress || 0));
+      const dash = (pct / 100) * 100.53;
+      overlay = `
+        <svg class="preview-progress" viewBox="0 0 36 36">
+          <circle class="pp-track" cx="18" cy="18" r="16"/>
+          <circle class="pp-bar" cx="18" cy="18" r="16"
+            stroke-dasharray="${dash.toFixed(2)} 100.53"
+            transform="rotate(-90 18 18)"/>
+        </svg>
+        <div class="preview-progress-text">${pct}%</div>`;
+    }
+    return `<div class="preview-item${isUploading ? ' uploading' : ''}">${media}${overlay}<button class="preview-remove" onclick="removeAttachment(${i})">✕</button></div>`;
   }).join('');
 }
 
 function removeAttachment(i) {
   const removed = pendingAttachments[i];
+  if (removed && removed._xhr) {
+    try { removed._xhr.abort(); } catch(e) {}
+  }
   if (removed && removed.localUrl) URL.revokeObjectURL(removed.localUrl);
   pendingAttachments.splice(i, 1);
   renderPreview();

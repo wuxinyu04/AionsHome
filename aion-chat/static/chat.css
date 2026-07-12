@@ -528,10 +528,13 @@ body[data-theme="light"] .msg-row.system .system-notice { background: rgba(0,0,0
 .preview-item { position:relative; border-radius:8px; overflow:hidden; border:1px solid var(--border); max-width:80px; max-height:80px; }
 .preview-item img, .preview-item video { width:80px; height:80px; object-fit:cover; display:block; }
 .preview-remove { position:absolute; top:2px; right:2px; background:rgba(0,0,0,0.7); color:#fff; border:none; border-radius:50%; width:20px; height:20px; font-size:12px; cursor:pointer; display:flex; align-items:center; justify-content:center; line-height:1; }
-/* 上传中：缩略图变灰 + 旋转 spinner（避免“点了没反应”） */
-.preview-item.uploading img, .preview-item.uploading video { opacity:0.5; }
-.preview-spinner { position:absolute; top:50%; left:50%; width:22px; height:22px; margin:-11px 0 0 -11px; border:2.5px solid rgba(255,255,255,0.35); border-top-color:#fff; border-radius:50%; animation:previewUploadSpin 0.8s linear infinite; pointer-events:none; }
-@keyframes previewUploadSpin { to { transform: rotate(360deg); } }
+/* 上传中：缩略图变灰 + SVG 进度环 + 中央百分比（XHR upload.onprogress 驱动） */
+.preview-item.uploading img, .preview-item.uploading video { opacity:0.55; }
+.preview-progress { position:absolute; top:50%; left:50%; width:36px; height:36px; margin:-18px 0 0 -18px; pointer-events:none; }
+.preview-progress .pp-track, .preview-progress .pp-bar { fill:none; stroke-width:3; }
+.preview-progress .pp-track { stroke:rgba(255,255,255,0.28); }
+.preview-progress .pp-bar { stroke:#fff; stroke-linecap:round; transition:stroke-dasharray 0.18s linear; }
+.preview-progress-text { position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); color:#fff; font-size:11px; font-weight:600; pointer-events:none; text-shadow:0 0 3px rgba(0,0,0,0.6); letter-spacing:-0.3px; }
 /* 上传结果 toast（独立元素，与 music-toast 同位置不同 ID） */
 .upload-toast { position:fixed; top:calc(max(34px, env(safe-area-inset-top, 0px)) + 92px); left:50%; transform:translateX(-50%) translateY(-8px); z-index:10002; padding:8px 16px; background:var(--surface,#1e1e2e); border:1px solid var(--border2,#333); border-radius:20px; box-shadow:0 4px 16px rgba(0,0,0,0.3); color:var(--text,#eee); font-size:13px; opacity:0; transition:opacity .2s, transform .2s; pointer-events:none; max-width:90vw; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .upload-toast.show { opacity:1; transform:translateX(-50%) translateY(0); }
