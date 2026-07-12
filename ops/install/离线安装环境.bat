@@ -2,7 +2,9 @@
 setlocal
 chcp 65001 >nul
 title Aion Chat 离线安装（无需联网）
-cd /d "%~dp0"
+:: ROOT = 项目根目录 (此 .bat 在 ops/install/, 跳两层)
+set "ROOT=%~dp0..\.."
+cd /d "%ROOT%"
 
 echo ════════════════════════════════════════
 echo   Aion Chat 离线一键安装
@@ -88,8 +90,8 @@ echo    venv 模块正常
 echo.
 echo [3/5] 创建虚拟环境 (.venv)...
 set "NEED_VENV=1"
-if exist ".venv\Scripts\activate.bat" (
-    findstr /i /c:"%CD%" ".venv\Scripts\activate.bat" >nul 2>&1
+if exist "%ROOT%\.venv\Scripts\activate.bat" (
+    findstr /i /c:"%CD%" "%ROOT%\.venv\Scripts\activate.bat" >nul 2>&1
     if not errorlevel 1 (
         set "NEED_VENV=0"
         echo    虚拟环境已存在且路径正确，跳过创建
@@ -125,7 +127,7 @@ if not exist "vendor" (
     exit /b 1
 )
 
-.venv\Scripts\python -m pip install --no-index --find-links "%~dp0vendor" -r "%~dp0aion-chat\requirements.txt" -q
+"%ROOT%\.venv\Scripts\python" -m pip install --no-index --find-links "%ROOT%\vendor" -r "%ROOT%\aion-chat\requirements.txt" -q
 if errorlevel 1 (
     echo.
     echo    离线安装出错，正在尝试逐个安装...
@@ -137,7 +139,7 @@ if errorlevel 1 (
         lxml websockets pywin32 psutil akshare chinese-calendar
     ) do (
         echo    正在安装 %%p ...
-        .venv\Scripts\python -m pip install --no-index --find-links "%~dp0vendor" %%p -q 2>nul
+        "%ROOT%\.venv\Scripts\python" -m pip install --no-index --find-links "%ROOT%\vendor" %%p -q 2>nul
         if errorlevel 1 (
             echo    [跳过] %%p 安装失败，可能缺少对应 Python %PYVER% 的预编译包
         )
@@ -152,16 +154,16 @@ echo.
 echo [5/5] 检查安装结果...
 set "ALL_OK=1"
 
-.venv\Scripts\python -c "import fastapi; print('    FastAPI  ', fastapi.__version__)" 2>nul || (echo     [!] FastAPI 未安装 & set "ALL_OK=0")
-.venv\Scripts\python -c "import cv2; print('    OpenCV   ', cv2.__version__)" 2>nul || (echo     [!] OpenCV 未安装 & set "ALL_OK=0")
-.venv\Scripts\python -c "import numpy; print('    NumPy    ', numpy.__version__)" 2>nul || (echo     [!] NumPy 未安装 & set "ALL_OK=0")
-.venv\Scripts\python -c "import pyncm; print('    PyNCM     OK')" 2>nul || (echo     [!] PyNCM 未安装 & set "ALL_OK=0")
-.venv\Scripts\python -c "import psutil; print('    psutil   ', psutil.__version__)" 2>nul || (echo     [!] psutil 未安装 & set "ALL_OK=0")
-.venv\Scripts\python -c "import ebooklib; print('    ebooklib  OK')" 2>nul || (echo     [!] ebooklib 未安装 & set "ALL_OK=0")
-.venv\Scripts\python -c "import bs4; print('    BS4       OK')" 2>nul || (echo     [!] BeautifulSoup4 未安装 & set "ALL_OK=0")
-.venv\Scripts\python -c "import lxml; print('    lxml      OK')" 2>nul || (echo     [!] lxml 未安装 & set "ALL_OK=0")
-.venv\Scripts\python -c "import websockets; print('    websockets OK')" 2>nul || (echo     [!] websockets 未安装 & set "ALL_OK=0")
-.venv\Scripts\python -c "import pandas; print('    pandas   ', pandas.__version__)" 2>nul || (echo     [!] pandas 未安装 & set "ALL_OK=0")
+"%ROOT%\.venv\Scripts\python" -c "import fastapi; print('    FastAPI  ', fastapi.__version__)" 2>nul || (echo     [!] FastAPI 未安装 & set "ALL_OK=0")
+"%ROOT%\.venv\Scripts\python" -c "import cv2; print('    OpenCV   ', cv2.__version__)" 2>nul || (echo     [!] OpenCV 未安装 & set "ALL_OK=0")
+"%ROOT%\.venv\Scripts\python" -c "import numpy; print('    NumPy    ', numpy.__version__)" 2>nul || (echo     [!] NumPy 未安装 & set "ALL_OK=0")
+"%ROOT%\.venv\Scripts\python" -c "import pyncm; print('    PyNCM     OK')" 2>nul || (echo     [!] PyNCM 未安装 & set "ALL_OK=0")
+"%ROOT%\.venv\Scripts\python" -c "import psutil; print('    psutil   ', psutil.__version__)" 2>nul || (echo     [!] psutil 未安装 & set "ALL_OK=0")
+"%ROOT%\.venv\Scripts\python" -c "import ebooklib; print('    ebooklib  OK')" 2>nul || (echo     [!] ebooklib 未安装 & set "ALL_OK=0")
+"%ROOT%\.venv\Scripts\python" -c "import bs4; print('    BS4       OK')" 2>nul || (echo     [!] BeautifulSoup4 未安装 & set "ALL_OK=0")
+"%ROOT%\.venv\Scripts\python" -c "import lxml; print('    lxml      OK')" 2>nul || (echo     [!] lxml 未安装 & set "ALL_OK=0")
+"%ROOT%\.venv\Scripts\python" -c "import websockets; print('    websockets OK')" 2>nul || (echo     [!] websockets 未安装 & set "ALL_OK=0")
+"%ROOT%\.venv\Scripts\python" -c "import pandas; print('    pandas   ', pandas.__version__)" 2>nul || (echo     [!] pandas 未安装 & set "ALL_OK=0")
 
 echo.
 if "%ALL_OK%"=="1" (

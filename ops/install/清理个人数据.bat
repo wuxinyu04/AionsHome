@@ -1,6 +1,8 @@
 @echo off
 chcp 65001 >nul
-cd /d "%~dp0"
+:: ROOT = 项目根目录 (此 .bat 在 ops/install/, 跳两层)
+set "ROOT=%~dp0..\.."
+cd /d "%ROOT%"
 
 echo ========================================
 echo   清理个人数据（打包给朋友前使用）

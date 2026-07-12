@@ -1,10 +1,12 @@
 @echo off
 chcp 65001 >nul
 title Aion Chat
-cd /d "%~dp0"
+:: ROOT = 项目根目录 (此 .bat 在 ops/install/, 跳两层)
+set "ROOT=%~dp0..\.."
+cd /d "%ROOT%"
 
-if exist "%~dp0.venv\Scripts\activate.bat" (
-    call "%~dp0.venv\Scripts\activate.bat"
+if exist "%ROOT%\.venv\Scripts\activate.bat" (
+    call "%ROOT%\.venv\Scripts\activate.bat"
 )
 
 echo ========================================
@@ -13,6 +15,6 @@ echo   http://localhost:8080
 echo   关闭此窗口即停止服务
 echo ========================================
 
-cd /d "%~dp0aion-chat"
+cd /d "%ROOT%\aion-chat"
 python -u main.py
 pause

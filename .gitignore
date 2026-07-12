@@ -103,3 +103,7 @@ public/AIIcon.default.png
 # ── 本地安装包 / 安装器不入库 ──
 *.exe
 tailscale-setup.exe
+
+# ── 启动日志（运行时生成，量大） ──
+start.log
+start_err.log

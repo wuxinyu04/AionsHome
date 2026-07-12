@@ -1,6 +1,8 @@
 @echo off
 setlocal
-cd /d "%~dp0"
+:: ROOT = 项目根目录 (此 .bat 在 ops/install/, 跳两层)
+set "ROOT=%~dp0..\.."
+cd /d "%ROOT%"
 
 echo ========================================
 echo   Aion Chat - Environment Setup
@@ -52,8 +54,8 @@ echo    [OK] venv module ready
 echo.
 echo [3/5] Creating virtual environment (.venv) ...
 set "NEED_VENV=1"
-if exist ".venv\Scripts\activate.bat" (
-    findstr /i /c:"%CD%" ".venv\Scripts\activate.bat" >nul 2>&1
+if exist "%ROOT%\.venv\Scripts\activate.bat" (
+    findstr /i /c:"%CD%" "%ROOT%\.venv\Scripts\activate.bat" >nul 2>&1
     if not errorlevel 1 (
         set "NEED_VENV=0"
         echo    .venv already exists, skipping
@@ -81,19 +83,19 @@ echo.
 echo [4/5] Installing dependencies (may take a few minutes) ...
 if exist "vendor" (
     echo    Local vendor packages found; trying offline install first ...
-    .venv\Scripts\python -m pip install --no-index --find-links "%~dp0vendor" -r "%~dp0aion-chat\requirements.txt" -q
+    "%ROOT%\.venv\Scripts\python" -m pip install --no-index --find-links "%ROOT%\vendor" -r "%ROOT%\aion-chat\requirements.txt" -q
     if errorlevel 1 (
         echo.
         echo    Offline install failed, retrying with local packages plus Aliyun mirror ...
-        .venv\Scripts\python -m pip install --find-links "%~dp0vendor" -r "%~dp0aion-chat\requirements.txt" -i https://mirrors.aliyun.com/pypi/simple/ -q
+        "%ROOT%\.venv\Scripts\python" -m pip install --find-links "%ROOT%\vendor" -r "%ROOT%\aion-chat\requirements.txt" -i https://mirrors.aliyun.com/pypi/simple/ -q
     )
 ) else (
     echo    Trying Aliyun mirror first for speed ...
-    .venv\Scripts\python -m pip install -r "%~dp0aion-chat\requirements.txt" -i https://mirrors.aliyun.com/pypi/simple/ -q
+    "%ROOT%\.venv\Scripts\python" -m pip install -r "%ROOT%\aion-chat\requirements.txt" -i https://mirrors.aliyun.com/pypi/simple/ -q
     if errorlevel 1 (
         echo.
         echo    Mirror failed, retrying with default PyPI ...
-        .venv\Scripts\python -m pip install -r "%~dp0aion-chat\requirements.txt" -q
+        "%ROOT%\.venv\Scripts\python" -m pip install -r "%ROOT%\aion-chat\requirements.txt" -q
     )
 )
 if errorlevel 1 (
@@ -120,13 +122,13 @@ echo    [OK] All dependencies installed
 :: ----------------------------------------
 echo.
 echo [5/5] Verifying installation ...
-.venv\Scripts\python -c "import fastapi; print('    FastAPI', fastapi.__version__)"
-.venv\Scripts\python -c "import cv2; print('    OpenCV ', cv2.__version__)"
-.venv\Scripts\python -c "import numpy; print('    NumPy  ', numpy.__version__)"
-.venv\Scripts\python -c "import pyncm; print('    PyNCM   OK')"
-.venv\Scripts\python -c "import psutil; print('    psutil ', psutil.__version__)"
-.venv\Scripts\python -c "import ebooklib; print('    ebooklib OK')"
-.venv\Scripts\python -c "import bs4; print('    BeautifulSoup4 OK')"
+"%ROOT%\.venv\Scripts\python" -c "import fastapi; print('    FastAPI', fastapi.__version__)"
+"%ROOT%\.venv\Scripts\python" -c "import cv2; print('    OpenCV ', cv2.__version__)"
+"%ROOT%\.venv\Scripts\python" -c "import numpy; print('    NumPy  ', numpy.__version__)"
+"%ROOT%\.venv\Scripts\python" -c "import pyncm; print('    PyNCM   OK')"
+"%ROOT%\.venv\Scripts\python" -c "import psutil; print('    psutil ', psutil.__version__)"
+"%ROOT%\.venv\Scripts\python" -c "import ebooklib; print('    ebooklib OK')"
+"%ROOT%\.venv\Scripts\python" -c "import bs4; print('    BeautifulSoup4 OK')"
 
 echo.
 echo ========================================
