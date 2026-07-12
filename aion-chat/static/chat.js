@@ -139,6 +139,26 @@ function renderInnerMonologues(html) {
     `<span class="inner-monologue">${content.trim()}</span>`
   );
 }
+
+// ── MD 渲染初始化 ──
+// marked v12 + hljs：注册 code 渲染器调 hljs.highlight
+if (window.marked && window.hljs) {
+  marked.use({
+    renderer: {
+      code(code, lang) {
+        const language = (lang || '').match(/\S*/)[0];
+        let body;
+        try {
+          body = language && hljs.getLanguage(language)
+            ? hljs.highlight(code, { language, ignoreIllegals: true }).value
+            : hljs.highlightAuto(code).value;
+        } catch (_) { body = escHtml(code); }
+        return `<pre><code class="hljs language-${language}">${body}</code></pre>`;
+      }
+    }
+  });
+  marked.setOptions({ breaks: true, gfm: true, pedantic: false });
+}
 function innerMonologueText(s) {
   const match = String(s || '').match(/^\s*\[心里嘀咕[：:]\s*([^\]]+?)\]\s*$/);
   return match ? match[1].trim() : null;
@@ -170,37 +190,58 @@ function renderMsgPart(p) {
   }).join('');
 }
 function formatMsg(s) {
-  // 先转义 HTML，再将 [[image:path]] 标记渲染为 <img>
-  const escaped = escHtml(s);
+  // 流水线：HTML escape → 占位(转账/图片) → marked.parse → 还原占位 → DOMPurify → renderInnerMonologues
+  if (s == null) return '';
+  let text = escHtml(String(s));
   // 渲染 [转账给XXX：N元] 或 [转账：N元] 为微信风格卡片
   const transferRe = /\[\u8f6c\u8d26(?:\u7ed9([^\uff1a:]+?))?[\uff1a:]\s*(-?\d+(?:\.\d+)?)\s*\u5143\]/g;
   const aiName = (worldBook && worldBook.ai_name) || 'AI';
   const userName = (worldBook && worldBook.user_name) || '你';
-  let processed = escaped.replace(transferRe, (match, recipient, amount) => {
+  // 2. 占位：自定义卡片先抽出（避免被 marked 当成普通文本或破坏 MD 块结构）
+  const blocks = [];
+  const reserve = (html) => {
+    blocks.push(html);
+    return `\n\n<!--AIONBLOCK${blocks.length - 1}-->\n\n`;
+  };
+
+  let processed = text.replace(transferRe, (match, recipient, amount) => {
     const val = parseFloat(amount);
     const isNeg = val < 0;
     const absVal = Math.abs(val);
     const targetName = recipient ? recipient.trim() : '';
     if (isNeg) {
       // 负数 = 钱包扣除
-      return `<div class="transfer-card deduct"><div class="transfer-card-icon-wrap"><svg viewBox="0 0 40 40" width="28" height="28"><circle cx="20" cy="20" r="18" fill="none" stroke="#fff" stroke-width="2.5"/><line x1="14" y1="14" x2="26" y2="26" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/><line x1="26" y1="14" x2="14" y2="26" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/></svg></div><div class="transfer-card-body"><div class="transfer-card-amount">¥${absVal}</div><div class="transfer-card-desc">钱包扣除${targetName ? '（' + targetName + '）' : ''}</div></div><div class="transfer-card-footer">扣除</div></div>`;
+      return reserve(`<div class="transfer-card deduct"><div class="transfer-card-icon-wrap"><svg viewBox="0 0 40 40" width="28" height="28"><circle cx="20" cy="20" r="18" fill="none" stroke="#fff" stroke-width="2.5"/><line x1="14" y1="14" x2="26" y2="26" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/><line x1="26" y1="14" x2="14" y2="26" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/></svg></div><div class="transfer-card-body"><div class="transfer-card-amount">¥${absVal}</div><div class="transfer-card-desc">钱包扣除${targetName ? '（' + targetName + '）' : ''}</div></div><div class="transfer-card-footer">扣除</div></div>`);
     } else {
       // 正数 = 转账
       const descText = targetName ? `转账给${targetName}` : '发起了一笔转账';
-      return `<div class="transfer-card"><div class="transfer-card-icon-wrap"><svg viewBox="0 0 40 40" width="28" height="28"><circle cx="20" cy="20" r="18" fill="none" stroke="#fff" stroke-width="2.5"/><path d="M12 17h12M24 17l-3-3" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/><path d="M28 23H16M16 23l3 3" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg></div><div class="transfer-card-body"><div class="transfer-card-amount">¥${absVal}</div><div class="transfer-card-desc">${descText}</div></div><div class="transfer-card-footer">转账</div></div>`;
+      return reserve(`<div class="transfer-card"><div class="transfer-card-icon-wrap"><svg viewBox="0 0 40 40" width="28" height="28"><circle cx="20" cy="20" r="18" fill="none" stroke="#fff" stroke-width="2.5"/><path d="M12 17h12M24 17l-3-3" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/><path d="M28 23H16M16 23l3 3" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg></div><div class="transfer-card-body"><div class="transfer-card-amount">¥${absVal}</div><div class="transfer-card-desc">${descText}</div></div><div class="transfer-card-footer">转账</div></div>`);
     }
   });
-  // 渲染 [[image:path]]
+
+  // 2b. [[image:path]] 图片
   const imgRe = /\[\[image:(\S+?)\]\]/g;
-  let result = '', lastIdx = 0, match;
-  while ((match = imgRe.exec(processed)) !== null) {
-    result += processed.slice(lastIdx, match.index).replace(/\n/g, '<br>');
-    const safeUrl = match[1];
-    result += `<img class="cr-inline-img" src="${safeUrl}" onclick="openImageViewer && openImageViewer(this.src)" loading="lazy" style="max-width:100%;border-radius:8px;cursor:pointer;margin:4px 0">`;
-    lastIdx = imgRe.lastIndex;
+  processed = processed.replace(imgRe, (m, url) =>
+    reserve(`<img class="cr-inline-img" src="${escHtml(url)}" onclick="openImageViewer && openImageViewer(this.src)" loading="lazy" style="max-width:100%;border-radius:8px;cursor:pointer;margin:4px 0">`)
+  );
+
+  // 3. MD 渲染（marked 保留 HTML 注释原文，所以占位能活着穿过整篇）
+  let html = window.marked ? marked.parse(processed) : processed.replace(/\n/g, '<br>');
+
+  // 4. 占位还原成真 HTML
+  html = html.replace(/<!--AIONBLOCK(\d+)-->/g, (_, i) => blocks[+i] || '');
+
+  // 5. XSS 兜底
+  if (window.DOMPurify) {
+    html = DOMPurify.sanitize(html, {
+      ADD_ATTR: ['onclick', 'loading'],
+      ADD_TAGS: ['svg', 'path', 'line', 'circle', 'mark'],
+      FORBID_TAGS: ['script', 'iframe', 'object', 'embed', 'style'],
+      FORBID_ATTR: ['onerror', 'onload'],
+    });
   }
-  result += processed.slice(lastIdx).replace(/\n/g, '<br>');
-  return renderInnerMonologues(result);
+
+  return renderInnerMonologues(html);
 }
 
 // ── 配置弹窗 ──
@@ -1476,6 +1517,9 @@ function handleSync(msg) {
       // autoplay：闹铃/定时监控触发的音乐才自动播放第一首；其余只入队
       handleMusicCards(data, { play: !!data.autoplay });
     }
+  } else if (type === "music_mgmt") {
+    // AI 音乐管理指令结果（红心/建歌单/加歌单），始终处理（不守卫 streamingAiId，否则流式时丢失）
+    handleMusicMgmt(data);
   } else if (type === "image_gen_start") {
     // 通过 WebSocket 收到生图开始（语音发送时前端没有 SSE 流）
     if (data.conv_id === currentConvId && !streamingAiId) {
@@ -2329,8 +2373,8 @@ function buildMusicCardHtml(song) {
   const songId = song.id;
   if (song && song.id != null) musicSongIndex[song.id] = song;
 
-  // 立即播放（跳到该曲）+ 加入队列
-  const onlineBtn = `<button class="music-btn secondary" onclick="playMusicOnline(${songId})">▶ 立即播放</button><button class="music-btn secondary" onclick="enqueueMusicById(${songId})">➕ 加入队列</button>`;
+  // 立即播放（跳到该曲）+ 加入队列 + 红心
+  const onlineBtn = `<button class="music-btn secondary" onclick="playMusicOnline(${songId})">▶ 立即播放</button><button class="music-btn secondary" onclick="enqueueMusicById(${songId})">➕ 加入队列</button><button class="music-btn secondary" onclick="likeSongFromCard(${songId}, this)">${musicLikedIds.has(songId) ? '♥ 已红心' : '♡ 红心'}</button>`;
 
   // 备选歌曲
   let candidatesHtml = '';
@@ -2699,6 +2743,19 @@ function musicClose() {
   musicIndex = -1; musicSaveState(); musicRenderBar();
   musicReportNowPlaying(true); // 清空后端 now_playing
 }
+function musicClearQueue() {
+  if (!musicQueue.length && musicIndex < 0) return;
+  musicQueue = [];
+  musicIndex = -1;
+  if (musicAudio) { try { musicAudio.pause(); } catch (e) {} musicAudio.src = ''; }
+  musicSaveQueue(); musicSaveState();
+  musicReportNowPlaying(true);
+  musicBroadcast({ type: 'queue_update', queue: musicQueue, index: musicIndex, tabId: musicTabId });
+  musicRenderBar();
+  if (typeof musicRenderQueueList === 'function') musicRenderQueueList();
+  if (typeof musicPlayerRender === 'function') musicPlayerRender();
+  if (typeof showToast === 'function') showToast('已清空队列');
+}
 function musicBroadcastState() {
   if (!musicIsLeader) return;
   const cur = musicCurrent();
@@ -2751,6 +2808,20 @@ function enqueueMusicById(songId) {
   }
 }
 
+// 卡片"红心"按钮：toggle 红心并更新按钮文案
+function likeSongFromCard(songId, btn) {
+  if (!btn) return;
+  const liked = btn.dataset.liked === '1';
+  const newLike = !liked;
+  api('POST', '/api/music/like/' + songId + '?like=' + newLike).then(r => {
+    if (r && r.ok) {
+      btn.dataset.liked = newLike ? '1' : '0';
+      btn.textContent = newLike ? '♥ 已红心' : '♡ 红心';
+      if (newLike) musicLikedIds.add(songId); else musicLikedIds.delete(songId);
+    }
+  }).catch(() => {});
+}
+
 // 统一处理 WS music 事件：存卡片 + 渲染 + 全部入队（默认播第一首）
 function handleMusicCards(data, opts) {
   opts = opts || {};
@@ -2762,6 +2833,36 @@ function handleMusicCards(data, opts) {
   const cards = data.cards || [];
   if (!cards.length) return;
   enqueueMusic(cards, { play: opts.play !== false });
+}
+
+// AI 音乐管理指令结果 → toast 提示
+function handleMusicMgmt(card) {
+  if (!card) return;
+  let text = '';
+  if (card.action === 'like') {
+    text = card.ok ? `❤️ 已红心《${card.name || ''}》${card.artist ? '- ' + card.artist : ''}` : `❤️ ${card.msg || '失败'}`;
+  } else if (card.action === 'playlist_new') {
+    text = card.ok ? `📑 已建歌单「${card.name || ''}」` : `📑 ${card.msg || '失败'}`;
+  } else if (card.action === 'playlist_add') {
+    text = card.ok ? `📑 已加入歌单「${card.playlist || ''}」：《${card.name || ''}》` : `📑 ${card.msg || '失败'}`;
+  }
+  if (text) musicToast(text);
+  // 红心/加歌单后刷新本地 liked 集合与歌单缓存
+  if (card.ok && card.action === 'like' && card.id != null) musicLikedIds.add(card.id);
+}
+
+function musicToast(text) {
+  let el = document.getElementById('musicToast');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'musicToast';
+    el.className = 'music-toast';
+    document.body.appendChild(el);
+  }
+  el.textContent = text;
+  el.classList.add('show');
+  clearTimeout(el._t);
+  el._t = setTimeout(() => el.classList.remove('show'), 3500);
 }
 
 // ── 全屏播放器 overlay（复用 song-player-overlay 样式，加队列/歌词面板）──
@@ -2801,11 +2902,15 @@ function openMusicPlayer() {
       <div class="mp-tabs">
         <button class="mp-tab active" data-tab="lyrics">歌词</button>
         <button class="mp-tab" data-tab="queue">队列 <span class="mp-queue-count">0</span></button>
+        <button class="mp-tab" data-tab="favorites">喜欢</button>
+        <button class="mp-tab" data-tab="playlists">歌单</button>
         <button class="mp-tab" data-tab="search">搜索</button>
-        <button class="mp-tab" data-tab="shared">一起听过</button>
+        <button class="mp-tab" data-tab="shared">历史</button>
       </div>
       <div class="mp-panel mp-lyrics-panel"><div class="mp-lyrics"><span class="song-player-empty">暂无歌词</span></div></div>
       <div class="mp-panel mp-queue-panel" hidden><div class="mp-queue-list"></div></div>
+      <div class="mp-panel mp-favorites-panel" hidden><div class="mp-favorites-list"><span class="song-player-empty">加载中…</span></div></div>
+      <div class="mp-panel mp-playlists-panel" hidden><div class="mp-playlists-list"><span class="song-player-empty">加载中…</span></div></div>
       <div class="mp-panel mp-search-panel" hidden>
         <input class="mp-search-input" type="text" placeholder="搜歌名或歌手，回车搜索…" autocomplete="off">
         <div class="mp-search-list"><span class="song-player-empty">输入歌名或歌手搜索</span></div>
@@ -2897,9 +3002,13 @@ function musicSwitchTab(tab) {
   ov.querySelectorAll('.mp-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
   ov.querySelector('.mp-lyrics-panel').hidden = tab !== 'lyrics';
   ov.querySelector('.mp-queue-panel').hidden = tab !== 'queue';
+  ov.querySelector('.mp-favorites-panel').hidden = tab !== 'favorites';
+  ov.querySelector('.mp-playlists-panel').hidden = tab !== 'playlists';
   ov.querySelector('.mp-search-panel').hidden = tab !== 'search';
   ov.querySelector('.mp-shared-panel').hidden = tab !== 'shared';
   if (tab === 'shared') loadMusicSharedList();
+  if (tab === 'favorites') loadMusicFavorites();
+  if (tab === 'playlists') loadMusicPlaylists();
   if (tab === 'search') { const si = ov.querySelector('.mp-search-input'); if (si) si.focus(); }
 }
 
@@ -2919,6 +3028,7 @@ function musicSearchSongs(q) {
       <div class="mp-q-item" data-id="${s.id}">
         <img class="mp-q-cover" src="${escHtml(s.cover || '')}" alt="" onerror="this.style.visibility='hidden'">
         <div class="mp-q-info"><div class="mp-q-name">${escHtml(s.name || '未知')}</div><div class="mp-q-artist">${escHtml(s.artist || '')}</div></div>
+        <button class="mp-like ${musicLikedIds.has(s.id) ? 'liked' : ''}" data-id="${s.id}" data-act="like" title="红心">${musicLikedIds.has(s.id) ? '♥' : '♡'}</button>
         <button class="mp-sh-play" data-id="${s.id}" data-act="add" title="加入队列">➕</button>
         <button class="mp-sh-play" data-id="${s.id}" data-act="play" title="立即播放">▶</button>
       </div>`).join('');
@@ -2929,7 +3039,8 @@ function musicSearchSongs(q) {
           const id = parseInt(b.dataset.id);
           const song = musicSongIndex[id];
           if (!song) return;
-          if (b.dataset.act === 'add') enqueueMusic([song], { play: false });
+          if (b.dataset.act === 'like') toggleLike(id, b);
+          else if (b.dataset.act === 'add') enqueueMusic([song], { play: false });
           else playMusicNow(song);
         });
       });
@@ -2941,12 +3052,16 @@ function musicRenderQueueList() {
   const list = ov.querySelector('.mp-queue-list'); if (!list) return;
   ov.querySelector('.mp-queue-count').textContent = musicQueue.length;
   if (!musicQueue.length) { list.innerHTML = '<div class="song-player-empty">队列为空，让 AI 点歌或在卡片点"加入队列"</div>'; return; }
-  list.innerHTML = musicQueue.map((s, i) => `
+  let html = `<div class="mp-q-clearall" id="mpQClearAll">清空队列 (${musicQueue.length})</div>`;
+  html += musicQueue.map((s, i) => `
     <div class="mp-q-item ${i === musicIndex ? 'current' : ''}" data-i="${i}">
       <img class="mp-q-cover" src="${escHtml(s.cover || '')}" alt="" onerror="this.style.visibility='hidden'">
       <div class="mp-q-info"><div class="mp-q-name">${escHtml(s.name || '未知')}</div><div class="mp-q-artist">${escHtml(s.artist || '')}</div></div>
       <button class="mp-q-del" data-del="${i}" title="移除">✕</button>
     </div>`).join('');
+  list.innerHTML = html;
+  const clearBtn = list.querySelector('#mpQClearAll');
+  if (clearBtn) clearBtn.onclick = () => { if (confirm('清空整个队列？')) musicClearQueue(); };
   list.querySelectorAll('.mp-q-item').forEach(el => {
     el.addEventListener('click', (e) => {
       if (e.target.classList.contains('mp-q-del')) return;
@@ -3016,6 +3131,109 @@ function loadMusicSharedList() {
     });
   }).catch(() => { panel.innerHTML = '<span class="song-player-empty">加载失败</span>'; });
 }
+
+// ── 你的网易云曲库：红心 / 歌单 ──
+let musicLikedIds = new Set();   // 已红心歌曲 id 集合（加载红心歌单时填充）
+
+// 通用歌曲行渲染（♥红心 / ➕加入队列 / ▶立即播放），用于红心歌单、歌单曲目
+function musicRenderSongRows(container, songs) {
+  if (!songs.length) { container.innerHTML = '<span class="song-player-empty">暂无歌曲</span>'; return; }
+  container.innerHTML = songs.map(s => `
+    <div class="mp-q-item" data-id="${s.id}">
+      <img class="mp-q-cover" src="${escHtml(s.cover || '')}" alt="" onerror="this.style.visibility='hidden'">
+      <div class="mp-q-info"><div class="mp-q-name">${escHtml(s.name || '未知')}</div><div class="mp-q-artist">${escHtml(s.artist || '')}</div></div>
+      <button class="mp-like ${musicLikedIds.has(s.id) ? 'liked' : ''}" data-id="${s.id}" data-act="like" title="红心">${musicLikedIds.has(s.id) ? '♥' : '♡'}</button>
+      <button class="mp-sh-play" data-id="${s.id}" data-act="add" title="加入队列">➕</button>
+      <button class="mp-sh-play" data-id="${s.id}" data-act="play" title="立即播放">▶</button>
+    </div>`).join('');
+  songs.forEach(s => { if (s && s.id != null) musicSongIndex[s.id] = s; });
+  container.querySelectorAll('.mp-q-item').forEach(el => {
+    el.querySelectorAll('button[data-id]').forEach(b => {
+      b.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const id = parseInt(b.dataset.id);
+        const song = musicSongIndex[id];
+        if (!song) return;
+        if (b.dataset.act === 'like') toggleLike(id, b);
+        else if (b.dataset.act === 'add') enqueueMusic([song], { play: false });
+        else if (b.dataset.act === 'play') playMusicNow(song);
+      });
+    });
+  });
+}
+
+function toggleLike(songId, btn) {
+  const liked = btn.classList.contains('liked');
+  const newLike = !liked;
+  api('POST', '/api/music/like/' + songId + '?like=' + newLike).then(r => {
+    if (r && r.ok) {
+      btn.classList.toggle('liked', newLike);
+      btn.textContent = newLike ? '♥' : '♡';
+      if (newLike) musicLikedIds.add(songId); else musicLikedIds.delete(songId);
+    }
+  }).catch(() => {});
+}
+
+function loadMusicFavorites() {
+  const ov = musicPlayerOverlay; if (!ov) return;
+  const panel = ov.querySelector('.mp-favorites-list'); if (!panel) return;
+  panel.innerHTML = '<span class="song-player-empty">加载中…</span>';
+  api('GET', '/api/music/favorites').then(res => {
+    const songs = (res && res.songs) || [];
+    if (!songs.length) { panel.innerHTML = '<span class="song-player-empty">还没有红心歌曲</span>'; return; }
+    songs.forEach(s => { if (s && s.id != null) musicLikedIds.add(s.id); }); // 红心歌单里的都是已红心
+    musicRenderSongRows(panel, songs);
+  }).catch(() => { panel.innerHTML = '<span class="song-player-empty">加载失败（确认设置页填了 UID）</span>'; });
+}
+
+function loadMusicPlaylists() {
+  const ov = musicPlayerOverlay; if (!ov) return;
+  const panel = ov.querySelector('.mp-playlists-list'); if (!panel) return;
+  panel.innerHTML = '<span class="song-player-empty">加载中…</span>';
+  api('GET', '/api/music/playlists').then(res => {
+    const pls = (res && res.playlists) || [];
+    if (res && res.error) { panel.innerHTML = '<span class="song-player-empty">' + escHtml(res.error) + '</span>'; return; }
+    if (!pls.length) { panel.innerHTML = '<span class="song-player-empty">没有歌单</span>'; return; }
+    panel.innerHTML = pls.map((p, i) => `
+      <div class="mp-pl-item" data-id="${p.id}">
+        <img class="mp-q-cover" src="${escHtml(p.cover || '')}" alt="" onerror="this.style.visibility='hidden'">
+        <div class="mp-q-info">
+          <div class="mp-q-name">${escHtml(p.name || '未命名')}${i === 0 ? ' <span class="mp-tag">红心</span>' : ''}</div>
+          <div class="mp-q-artist">${p.track_count || 0} 首 · 播放 ${p.play_count || 0}</div>
+        </div>
+        <span class="mp-pl-arrow">›</span>
+      </div>`).join('');
+    panel.querySelectorAll('.mp-pl-item').forEach(el => {
+      el.addEventListener('click', () => loadPlaylistTracks(parseInt(el.dataset.id), el.querySelector('.mp-q-name').textContent.replace('红心', '').trim()));
+    });
+  }).catch(() => { panel.innerHTML = '<span class="song-player-empty">加载失败</span>'; });
+}
+
+async function fetchPlaylistTracks(pid) {
+  try {
+    const res = await api('GET', '/api/music/playlist/' + pid);
+    return (res && res.songs) || [];
+  } catch (e) { return []; }
+}
+
+function loadPlaylistTracks(pid, name) {
+  const ov = musicPlayerOverlay; if (!ov) return;
+  const panel = ov.querySelector('.mp-playlists-list'); if (!panel) return;
+  panel.innerHTML = `<div class="mp-pl-back">‹ 返回歌单</div><div class="mp-pl-title">${escHtml(name || '')}</div><div class="mp-rows"><span class="song-player-empty">加载中…</span></div>`;
+  panel.querySelector('.mp-pl-back').addEventListener('click', loadMusicPlaylists);
+  const rows = panel.querySelector('.mp-rows');
+  fetchPlaylistTracks(pid).then(tracks => {
+    let header = `<div class="mp-pl-allbtns"><button class="mp-sh-play" data-act="play-all">▶ 整单播放</button><button class="mp-sh-play" data-act="add-all">➕ 加入队列</button></div>`;
+    rows.innerHTML = header;
+    if (!tracks.length) { rows.innerHTML += '<span class="song-player-empty">歌单为空</span>'; return; }
+    const songRows = document.createElement('div');
+    musicRenderSongRows(songRows, tracks);
+    rows.appendChild(songRows);
+    rows.querySelector('[data-act=play-all]').addEventListener('click', () => enqueueMusic(tracks, { play: true }));
+    rows.querySelector('[data-act=add-all]').addEventListener('click', () => enqueueMusic(tracks, { play: false }));
+  });
+}
+
 function closeMusicPlayer() {
   if (musicPlayerOverlay) { musicPlayerOverlay.remove(); musicPlayerOverlay = null; }
 }
@@ -5654,7 +5872,7 @@ async function _receiveGift(giftId) {
 // ── 子页面 iframe 浮层逻辑 ──
 let currentSubPage = null;
 window.getCurrentConversationId = function() { return currentConvId || ''; };
-const _subPageNames = {'/':'主页','/settings':'设置','/memory':'记忆库','/diary':'日记本','/worldbook':'世界书','/schedule':'日程','/camera':'摄像头','/monitor-logs':'监控日志','/location':'定位','/heart-whispers':'心语','/wishes':'许愿池'};
+const _subPageNames = {'/':'主页','/settings':'设置','/memory':'记忆库','/diary':'日记本','/worldbook':'世界书','/schedule':'日程','/camera':'摄像头','/monitor-logs':'监控日志','/location':'定位','/heart-whispers':'心语','/wishes':'许愿池','/music':'网易云音乐'};
 function parseSubPageColor(value) {
   if (!value || value === 'transparent') return null;
   const hexMatch = value.trim().match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i);

@@ -10,7 +10,9 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="theme-color" content="#ff8359">
-<link rel="stylesheet" href="/static/chat.css?v=date-summary-card-20260628">
+<link rel="stylesheet" href="/static/chat.css?v=md-20260712">
+<!-- 代码块语法高亮（dark 主题） -->
+<link rel="stylesheet" href="/static/vendor/atom-one-dark.min.css?v=1">
 </head>
 <body data-theme="dark">
 
@@ -290,7 +292,23 @@
     <iframe id="subPageFrame" class="sub-page-frame" sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-modals" allow="autoplay"></iframe>
   </div>
 </div>
-<script src="/static/chat.js?v=date-summary-card-20260628"></script>
+<!-- MD 渲染三件套（顺序：DOMPurify → hljs → langs → marked；chat.js 里 formatMsg 用） -->
+<script src="/static/vendor/purify.min.js?v=1"></script>
+<script src="/static/vendor/highlight.min.js?v=1"></script>
+<script src="/static/vendor/lang-bash.min.js?v=1"></script>
+<script src="/static/vendor/lang-css.min.js?v=1"></script>
+<script src="/static/vendor/lang-go.min.js?v=1"></script>
+<script src="/static/vendor/lang-java.min.js?v=1"></script>
+<script src="/static/vendor/lang-javascript.min.js?v=1"></script>
+<script src="/static/vendor/lang-json.min.js?v=1"></script>
+<script src="/static/vendor/lang-markdown.min.js?v=1"></script>
+<script src="/static/vendor/lang-python.min.js?v=1"></script>
+<script src="/static/vendor/lang-sql.min.js?v=1"></script>
+<script src="/static/vendor/lang-typescript.min.js?v=1"></script>
+<script src="/static/vendor/lang-xml.min.js?v=1"></script>
+<script src="/static/vendor/lang-yaml.min.js?v=1"></script>
+<script src="/static/vendor/marked.min.js?v=1"></script>
+<script src="/static/chat.js?v=md-20260712"></script>
 
 <!-- ── 转账弹窗 ── -->
 <div class="transfer-dialog-overlay" id="transferDialogOverlay" onclick="closeTransferDialog()">

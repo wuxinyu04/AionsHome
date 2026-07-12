@@ -364,6 +364,14 @@ body { font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-se
 .music-bar .mb-vol { width:48px; height:4px; accent-color:#ff9800; cursor:pointer; }
 .music-bar.mirror .mb-bar { pointer-events:none; opacity:0.6; }
 .music-bar.mirror .mb-vol { pointer-events:none; opacity:0.6; }
+/* ── 音乐管理指令 toast（红心/加歌单结果）── */
+.music-toast { position:fixed; top:calc(max(34px, env(safe-area-inset-top, 0px)) + 92px); left:50%; transform:translateX(-50%) translateY(-8px); z-index:10002; padding:8px 16px; background:var(--surface,#1e1e2e); border:1px solid var(--border2,#333); border-radius:20px; box-shadow:0 4px 16px rgba(0,0,0,0.3); color:var(--text,#eee); font-size:13px; opacity:0; transition:opacity .2s, transform .2s; pointer-events:none; max-width:90vw; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.music-toast.show { opacity:1; transform:translateX(-50%) translateY(0); }
+/* 清空队列按钮 */
+#musicPlayerOverlay .mp-q-clearall { padding:8px 12px; margin-bottom:6px; border-radius:8px; background:rgba(255,255,255,0.04); color:var(--text2); font-size:12px; text-align:center; cursor:pointer; border:1px dashed var(--border2); }
+#musicPlayerOverlay .mp-q-clearall:hover { background:rgba(229,57,53,0.12); color:#e53935; border-color:#e53935; }
+.q-clearall { padding:8px 12px; margin-bottom:8px; border-radius:8px; background:rgba(255,255,255,0.04); color:var(--text2); font-size:12px; text-align:center; cursor:pointer; border:1px dashed rgba(255,255,255,0.12); }
+.q-clearall:hover { background:rgba(194,12,12,0.12); color:var(--nm-red2); border-color:var(--nm-red2); }
 @media (max-width:560px) {
   .music-bar { gap:4px; padding:0 8px; height:38px; }
   .music-bar .mb-info { max-width:26vw; }
@@ -407,6 +415,25 @@ body { font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-se
 #musicPlayerOverlay .mp-search-input { width:100%; box-sizing:border-box; padding:8px 12px; border:1px solid var(--border); border-radius:8px; background:rgba(0,0,0,0.2); color:var(--text); font-size:14px; margin-bottom:8px; }
 #musicPlayerOverlay .mp-search-input:focus { outline:none; border-color:#1eb8b2; }
 #musicPlayerOverlay .mp-search-list { display:flex; flex-direction:column; gap:4px; }
+/* ♥ 红心按钮 */
+#musicPlayerOverlay .mp-like { background:none; border:none; font-size:15px; color:var(--text3); cursor:pointer; padding:4px 8px; flex-shrink:0; }
+#musicPlayerOverlay .mp-like:hover { color:#e53935; }
+#musicPlayerOverlay .mp-like.liked { color:#e53935; }
+/* 歌单列表 */
+#musicPlayerOverlay .mp-pl-item { display:flex; align-items:center; gap:10px; padding:6px 8px; border-radius:8px; cursor:pointer; }
+#musicPlayerOverlay .mp-pl-item:hover { background:rgba(255,255,255,0.06); }
+#musicPlayerOverlay .mp-pl-arrow { color:var(--text3); font-size:18px; flex-shrink:0; }
+#musicPlayerOverlay .mp-tag { font-size:10px; background:rgba(229,57,53,0.18); color:#e53935; padding:1px 6px; border-radius:8px; margin-left:4px; vertical-align:middle; }
+#musicPlayerOverlay .mp-pl-back { font-size:13px; color:var(--text2); cursor:pointer; padding:4px 0 8px; }
+#musicPlayerOverlay .mp-pl-back:hover { color:var(--text); }
+#musicPlayerOverlay .mp-pl-title { font-size:15px; font-weight:700; color:var(--text); margin-bottom:8px; }
+#musicPlayerOverlay .mp-pl-allbtns { display:flex; gap:8px; margin-bottom:8px; }
+#musicPlayerOverlay .mp-pl-allbtns button { flex:1; padding:7px; border:1px solid var(--border2); border-radius:8px; background:rgba(255,255,255,0.04); color:var(--text); font-size:12px; cursor:pointer; }
+#musicPlayerOverlay .mp-pl-allbtns button:hover { border-color:#1eb8b2; color:#1eb8b2; }
+#musicPlayerOverlay .mp-rows { display:flex; flex-direction:column; gap:4px; }
+/* 6 标签横滚（窄屏不挤） */
+#musicPlayerOverlay .mp-tabs { overflow-x:auto; scrollbar-width:thin; }
+#musicPlayerOverlay .mp-tabs::-webkit-scrollbar { height:3px; }
 @media (max-width:560px) {
   #musicPlayerOverlay .mp-sheet { width: 100%; max-height: 90vh; }
   #musicPlayerOverlay .mp-cover { width: 64px; height: 64px; }
@@ -2045,4 +2072,165 @@ body[data-theme="light"] .date-summary-text { color: #42506d; }
 }
 .msg-bubble:has(.transfer-card)::after {
   display: none !important;
+}
+
+/* ══════ Markdown 渲染样式（消息气泡内） ══════
+   marked v12 + highlight.js (atom-one-dark 主题)
+   用 :where() 把优先级压到 0，避免压过 .msg-bubble 自身的 padding/border
+────────────────────────────────────────────────── */
+.msg-bubble :where(h1, h2, h3, h4, h5, h6) {
+  margin: 8px 0 4px;
+  font-weight: 650;
+  line-height: 1.3;
+}
+.msg-bubble :where(h1) { font-size: 1.35em; }
+.msg-bubble :where(h2) { font-size: 1.22em; }
+.msg-bubble :where(h3) { font-size: 1.12em; }
+.msg-bubble :where(h4) { font-size: 1.05em; }
+.msg-bubble :where(h5, h6) { font-size: 1em; }
+.msg-bubble :where(h1, h2, h3) {
+  border-bottom: 1px solid rgba(127,127,127,.18);
+  padding-bottom: 4px;
+}
+.msg-bubble :where(p) { margin: 4px 0; }
+.msg-bubble :where(p):has(+ p) { margin-top: 6px; }
+.msg-bubble :where(strong) { font-weight: 700; }
+.msg-bubble :where(em) { font-style: italic; }
+.msg-bubble :where(del) { opacity: .55; }
+
+.msg-bubble :where(ul, ol) {
+  margin: 4px 0 4px 22px;
+  padding-left: 4px;
+}
+.msg-bubble :where(li) { margin: 2px 0; }
+.msg-bubble :where(li > p) { margin: 0; }
+
+/* 任务清单 */
+.msg-bubble :where(input[type="checkbox"]) {
+  margin-right: 6px;
+  vertical-align: middle;
+  accent-color: #ff8359;
+}
+
+/* 行内代码 */
+.msg-bubble :where(code) {
+  font-family: ui-monospace, "SFMono-Regular", "Cascadia Mono", "JetBrains Mono", "Menlo", monospace;
+  font-size: .92em;
+  padding: 1px 6px;
+  border-radius: 5px;
+  background: rgba(127,127,127,.18);
+  color: #ff8c69;
+}
+
+/* 代码块 */
+.msg-bubble :where(pre) {
+  margin: 6px 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  overflow-x: auto;
+  background: #282c34; /* atom-one-dark */
+  font-size: 13px;
+  line-height: 1.5;
+  border: 1px solid rgba(255,255,255,.06);
+}
+.msg-bubble :where(pre) code {
+  background: transparent;
+  padding: 0;
+  border-radius: 0;
+  color: inherit;
+  font-size: inherit;
+}
+.msg-bubble :where(pre code.hljs) {
+  display: block;
+  overflow-x: auto;
+}
+
+/* 引用 */
+.msg-bubble :where(blockquote) {
+  margin: 6px 0;
+  padding: 6px 12px;
+  border-left: 3px solid #ff8359;
+  background: rgba(127,127,127,.10);
+  border-radius: 0 6px 6px 0;
+  color: inherit;
+  opacity: .85;
+}
+.msg-bubble :where(blockquote > :first-child) { margin-top: 0; }
+.msg-bubble :where(blockquote > :last-child)  { margin-bottom: 0; }
+
+/* 水平分隔线 */
+.msg-bubble :where(hr) {
+  border: none;
+  border-top: 1px solid rgba(127,127,127,.25);
+  margin: 10px 0;
+}
+
+/* 链接 */
+.msg-bubble :where(a) {
+  color: #ff8359;
+  text-decoration: none;
+  border-bottom: 1px dashed currentColor;
+  word-break: break-all;
+}
+.msg-bubble :where(a:hover) {
+  color: #ffae8a;
+  border-bottom-style: solid;
+}
+
+/* 表格 */
+.msg-bubble :where(table) {
+  border-collapse: collapse;
+  margin: 6px 0;
+  width: auto;
+  max-width: 100%;
+  font-size: .92em;
+  border: 1px solid rgba(127,127,127,.25);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.msg-bubble :where(th, td) {
+  padding: 6px 10px;
+  border: 1px solid rgba(127,127,127,.25);
+  text-align: left;
+}
+.msg-bubble :where(th) {
+  background: rgba(127,127,127,.18);
+  font-weight: 650;
+}
+
+/* 图片（在 MD 上下文中，非 [[image:...]] 卡片） */
+.msg-bubble :where(img) {
+  max-width: 100%;
+  height: auto;
+  border-radius: 8px;
+  margin: 4px 0;
+}
+
+/* 标记高亮 ==text== */
+.msg-bubble :where(mark) {
+  background: #ffdf6b;
+  color: #4a3a00;
+  padding: 0 3px;
+  border-radius: 3px;
+}
+
+/* ─── 浅色主题覆盖 ─── */
+body[data-theme="light"] .msg-bubble :where(code) {
+  background: rgba(110,120,140,.14);
+  color: #c0372d;
+}
+body[data-theme="light"] .msg-bubble :where(pre) {
+  background: #fafafa;
+  border-color: rgba(0,0,0,.08);
+  color: #383a42;
+}
+body[data-theme="light"] .msg-bubble :where(blockquote) {
+  border-left-color: #ff8359;
+  background: rgba(110,120,140,.10);
+}
+body[data-theme="light"] .msg-bubble :where(th) {
+  background: rgba(110,120,140,.18);
+}
+body[data-theme="light"] .msg-bubble :where(a) {
+  color: #c4480f;
 }
