@@ -17,6 +17,7 @@ from ai_providers import stream_ai, CLI_STATUS_PREFIX
 from memory import recall_memories
 from music import search_songs, get_audio_url
 from routes.music import MUSIC_CMD_PATTERN
+from todos import process_todo_commands
 from tts import TTSStreamer
 
 log = logging.getLogger("schedule")
@@ -347,7 +348,7 @@ class ScheduleManager:
                 prefix[-1]["content"] += f"\n系统当前的准确时间是 {now_str}"
 
             abilities = []
-            abilities.append("[MUSIC:歌曲名 歌手名] — 点歌/推荐音乐。可连续点播多首加入播放队列依次连播；你能感知当前在放的曲目与「我们一起听过的歌」。不要在指令外重复歌曲信息。")
+            abilities.append("[MUSIC:歌曲名 歌手名] — 点歌/推荐音乐。可连续点播多首加入播放队列依次连播；你能感知当前在放的曲目与「我们一起听过的歌」。不要在指令外重复歌曲信息。[LIKE]/[LIKE:歌曲名] 红心；[PLAYLIST_NEW:名] 建歌单；[PLAYLIST_ADD:歌单名] 把当前在放的加进歌单（不存在自动建），[PLAYLIST_ADD:歌单名|歌曲名] 搜歌加进歌单。")
             abilities.append("[ALARM:YYYY-MM-DDTHH:MM|内容] — 设置闹铃，到时间系统会主动提醒用户。日期时间用ISO格式。")
             abilities.append("[REMINDER:YYYY-MM-DD|内容] — 设置日程提醒（不闹铃），你在合适时机自然提起即可。")
             abilities.append(f"[Monitor:YYYY-MM-DDTHH:MM|内容] — 设置定时监督。到时间后系统自动截取摄像头画面发送给你，你可以查看{user_name}的状态。")
@@ -456,8 +457,10 @@ class ScheduleManager:
         # 处理回复中可能包含的日程指令
         if is_chatroom:
             full_text = await process_schedule_commands(full_text, None, origin=origin, origin_room_id=target["room_id"], after_msg_id=ai_msg_id)
+            full_text = await process_todo_commands(full_text, None, origin=origin, origin_room_id=target["room_id"], after_msg_id=ai_msg_id)
         else:
             full_text = await process_schedule_commands(full_text, conv_id, after_msg_id=ai_msg_id)
+            full_text = await process_todo_commands(full_text, conv_id, after_msg_id=ai_msg_id)
 
         music_atts = [{"type": "music", "name": s["name"], "artist": s["artist"], "id": s["id"]} for s in music_cards] if music_cards else []
         att_json = json.dumps(music_atts, ensure_ascii=False) if music_atts else "[]"
@@ -626,7 +629,7 @@ class ScheduleManager:
                 prefix[-1]["content"] += f"\n系统当前的准确时间是 {now_str}"
 
             abilities = []
-            abilities.append("[MUSIC:歌曲名 歌手名] — 点歌/推荐音乐。可连续点播多首加入播放队列依次连播；你能感知当前在放的曲目与「我们一起听过的歌」。不要在指令外重复歌曲信息。")
+            abilities.append("[MUSIC:歌曲名 歌手名] — 点歌/推荐音乐。可连续点播多首加入播放队列依次连播；你能感知当前在放的曲目与「我们一起听过的歌」。不要在指令外重复歌曲信息。[LIKE]/[LIKE:歌曲名] 红心；[PLAYLIST_NEW:名] 建歌单；[PLAYLIST_ADD:歌单名] 把当前在放的加进歌单（不存在自动建），[PLAYLIST_ADD:歌单名|歌曲名] 搜歌加进歌单。")
             abilities.append("[ALARM:YYYY-MM-DDTHH:MM|内容] — 设置闹铃，到时间系统会主动提醒用户。日期时间用ISO格式。")
             abilities.append("[REMINDER:YYYY-MM-DD|内容] — 设置日程提醒（不闹铃），你在合适时机自然提起即可。")
             abilities.append(f"[Monitor:YYYY-MM-DDTHH:MM|内容] — 设置定时监督。到时间后系统自动截取摄像头画面发送给你，你可以查看{user_name}的状态。")
@@ -721,8 +724,10 @@ class ScheduleManager:
         # 处理回复中可能包含的日程指令
         if is_chatroom:
             full_text = await process_schedule_commands(full_text, None, origin=origin, origin_room_id=target["room_id"], after_msg_id=ai_msg_id)
+            full_text = await process_todo_commands(full_text, None, origin=origin, origin_room_id=target["room_id"], after_msg_id=ai_msg_id)
         else:
             full_text = await process_schedule_commands(full_text, conv_id, after_msg_id=ai_msg_id)
+            full_text = await process_todo_commands(full_text, conv_id, after_msg_id=ai_msg_id)
 
         music_atts = [{"type": "music", "name": s["name"], "artist": s["artist"], "id": s["id"]} for s in music_cards] if music_cards else []
         att_json = json.dumps(music_atts, ensure_ascii=False) if music_atts else "[]"

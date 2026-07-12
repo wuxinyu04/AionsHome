@@ -45,6 +45,7 @@ CAPABILITY_DEFS: list[CapabilityDef] = [
     CapabilityDef("music", "点歌", "media", "注入 [MUSIC:歌曲名 歌手名]，让模型可以点歌或推荐音乐；支持多首连播，并能感知当前在放的曲目。"),
     CapabilityDef("cam_check", "查看监控/状态", "core", "注入 [CAM_CHECK]，让模型可以主动请求查看当前画面。"),
     CapabilityDef("schedule", "闹铃/日程/监督", "core", "注入闹铃、日程、定时监督和删除日程指令；关闭后也不注入当前日程列表。"),
+    CapabilityDef("todo", "待办清单", "core", "注入 [TODO:...] 等指令，让模型可以增删改查你的待办清单；关闭后也不注入当前待办列表。"),
     CapabilityDef("home", "智能家居", "life", "注入 [HOME:...]，让模型可以控制或查询 Home Assistant 设备。"),
     CapabilityDef("activity_check", "查看活动动态", "context", "注入 [查看动态:n]，让模型可以查看近期设备活动摘要。", runtime_note="还需要活动日志页的 AI 联动开启。"),
     CapabilityDef("location_context", "位置上下文", "context", "注入当前位置/天气等上下文信息。"),
@@ -258,6 +259,12 @@ async def build_capability_prompt_items(
             "你能感知当前正在播放的曲目与「我们一起听过的歌」，可自然地就音乐评论或回忆。"
             "不要在指令外重复歌曲信息。"
         )
+        abilities.append(
+            "[LIKE] — 红心当前在放的歌；[LIKE:歌曲名 歌手名] — 搜并红心一首歌，加进用户「我喜欢的音乐」。"
+            "[PLAYLIST_NEW:歌单名] — 建新歌单。[PLAYLIST_ADD:歌单名] — 把当前在放的歌加进该歌单（歌单不存在会自动建）；"
+            "[PLAYLIST_ADD:歌单名|歌曲名 歌手名] — 搜歌并加进指定歌单。"
+            "你能看到用户的歌单列表（见上下文「你的歌单」），按歌单名操作即可。"
+        )
 
     if is_capability_enabled("cam_check"):
         abilities.append(
@@ -276,6 +283,14 @@ async def build_capability_prompt_items(
                 "是否在好好工作等，也可以当做下一次主动发送消息来使用，根据对话内容可以随时设定。日期时间用ISO格式。"
             ),
             "[SCHEDULE_DEL:日程id] — 删除指定日程/闹铃/定时监控。",
+        ])
+
+    if is_capability_enabled("todo"):
+        abilities.extend([
+            "[TODO:内容] - 添加一条待办。可在内容后用 | 追加优先级和分类，例如 [TODO:买牛奶|high|生活]；"
+            "优先级可选 low/normal/high（默认 normal），分类为自由文本。待办id见上方【当前待办清单】。",
+            "[TODO_DONE:待办id] - 把指定待办标记为已完成；[TODO_UNDO:待办id] - 重新打开已完成的待办。",
+            "[TODO_DEL:待办id] - 删除指定待办；[TODO_EDIT:待办id|新内容] - 修改待办内容。",
         ])
 
     if is_capability_enabled("home"):

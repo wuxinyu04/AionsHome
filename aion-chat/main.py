@@ -33,6 +33,7 @@ from routes import chat, cam as cam_routes, files, settings, memories
 from routes import voice as voice_routes
 from routes import music as music_routes
 from routes import schedule as schedule_routes
+from routes import todos as todos_routes
 from routes import location as location_routes
 from routes import heart_whispers as heart_whispers_routes
 from routes import moments as moments_routes
@@ -236,6 +237,7 @@ app.include_router(memories.router)
 app.include_router(voice_routes.router)
 app.include_router(music_routes.router)
 app.include_router(schedule_routes.router)
+app.include_router(todos_routes.router)
 app.include_router(location_routes.router)
 app.include_router(heart_whispers_routes.router)
 app.include_router(moments_routes.router)
@@ -301,6 +303,10 @@ async def memory_page():
 @app.get("/schedule")
 async def schedule_page():
     return FileResponse(BASE_DIR / "static" / "schedule.html", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+
+@app.get("/todos")
+async def todos_page():
+    return FileResponse(BASE_DIR / "static" / "todos.html", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
 @app.get("/camera")
 async def camera_page():
@@ -393,6 +399,10 @@ async def health_page():
 @app.get("/pet")
 async def pet_page():
     return FileResponse(BASE_DIR / "static" / "pet.html", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+
+@app.get("/music")
+async def music_page():
+    return FileResponse(BASE_DIR / "static" / "music.html", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
 # PWA：Service Worker 必须从根路径提供，作用域才能覆盖所有页面
 @app.get("/sw.js")

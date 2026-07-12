@@ -21,7 +21,7 @@ from memory import recall_memories, instant_digest, fetch_source_details, build_
 from camera import cam, CAM_CHECK_CMD, perform_cam_check
 from activity import get_activity_summary_for_prompt, get_user_dynamics_for_prompt
 from routes.files import export_conversation
-from routes.music import MUSIC_CMD_PATTERN
+from routes.music import MUSIC_CMD_PATTERN, LIKE_CMD_PATTERN, PLAYLIST_NEW_PATTERN, PLAYLIST_ADD_PATTERN
 import playback
 from song_gen import SONG_CMD_PATTERN, clean_song_visible_reply
 from tts import TTSStreamer
@@ -48,11 +48,12 @@ from context_builder import (
     fetch_merged_timeline, render_merged_timeline, build_health_summary,
     build_ability_block, WISH_CMD_PATTERN, _build_recall_query, strip_tool_commands,
 )
-from music import search_songs, get_audio_url
+from music import search_songs, get_audio_url, like_track, create_playlist, add_to_playlist, find_playlist_by_name
 from schedule import (
     ALARM_CMD, MONITOR_CMD, REMINDER_CMD, SCHEDULE_DEL_CMD, SCHEDULE_LIST_CMD,
     process_schedule_commands,
 )
+from todos import process_todo_commands
 from mcp_client import mcp_manager
 from luckin import (
     LuckinOrderError,
@@ -571,6 +572,78 @@ async def _music_sys_msg(conv_id: str, music_cards: list):
            "content": text, "created_at": now, "attachments": []}
     await manager.broadcast({"type": "msg_created", "data": msg})
 
+
+# ── AI 音乐管理指令执行：[LIKE] / [PLAYLIST_NEW] / [PLAYLIST_ADD] ──
+
+def _exec_like_cmd(arg: str) -> dict:
+    """[LIKE] 红心当前在放的歌；[LIKE:歌曲名] 搜并红心"""
+    try:
+        if arg:
+            results = search_songs(arg, limit=1)
+            if not results:
+                return {"ok": False, "action": "like", "msg": f"没搜到《{arg}》"}
+            song = results[0]
+        else:
+            np = playback.get_now_playing()
+            if not np or not np.get("song_id"):
+                return {"ok": False, "action": "like", "msg": "当前没有在播放的歌"}
+            song = {"id": np["song_id"], "name": np.get("name", ""), "artist": np.get("artist", "")}
+        ok = like_track(song["id"], True)
+        return {"ok": ok, "action": "like", "name": song.get("name", ""), "artist": song.get("artist", ""), "id": song["id"]}
+    except Exception as e:
+        return {"ok": False, "action": "like", "msg": f"红心失败：{e}"}
+
+
+def _exec_playlist_new_cmd(name: str) -> dict:
+    try:
+        p = create_playlist(name)
+        return {"ok": True, "action": "playlist_new", "name": name, "id": p.get("id")}
+    except Exception as e:
+        return {"ok": False, "action": "playlist_new", "msg": f"建歌单失败：{e}"}
+
+
+def _exec_playlist_add_cmd(arg: str) -> dict:
+    """[PLAYLIST_ADD:歌单名] 加当前在放的歌；[PLAYLIST_ADD:歌单名|歌曲名] 搜并加。歌单不存在自动建。"""
+    try:
+        uid = (SETTINGS.get("netease_uid") or "").strip()
+        if not uid:
+            return {"ok": False, "action": "playlist_add", "msg": "未配置 netease_uid"}
+        if "|" in arg:
+            pname, song_kw = arg.split("|", 1)
+            pname, song_kw = pname.strip(), song_kw.strip()
+            results = search_songs(song_kw, limit=1)
+            if not results:
+                return {"ok": False, "action": "playlist_add", "msg": f"没搜到《{song_kw}》"}
+            song = results[0]
+        else:
+            pname = arg.strip()
+            np = playback.get_now_playing()
+            if not np or not np.get("song_id"):
+                return {"ok": False, "action": "playlist_add", "msg": "当前没有在播放的歌"}
+            song = {"id": np["song_id"], "name": np.get("name", ""), "artist": np.get("artist", "")}
+        pl = find_playlist_by_name(int(uid), pname)
+        pid = pl["id"] if pl else create_playlist(pname).get("id")
+        add_to_playlist(pid, [song["id"]])
+        return {"ok": True, "action": "playlist_add", "playlist": pname, "name": song.get("name", ""), "artist": song.get("artist", ""), "playlist_id": pid}
+    except Exception as e:
+        return {"ok": False, "action": "playlist_add", "msg": f"加歌失败：{e}"}
+
+
+def _handle_music_mgmt_cmds(full_text: str):
+    """检测并执行 [LIKE]/[PLAYLIST_NEW]/[PLAYLIST_ADD]，返回 (剥离后文本, 结果卡片列表)"""
+    cards = []
+    for m in LIKE_CMD_PATTERN.finditer(full_text):
+        cards.append(_exec_like_cmd((m.group(1) or "").strip()))
+    full_text = LIKE_CMD_PATTERN.sub("", full_text)
+    for m in PLAYLIST_NEW_PATTERN.finditer(full_text):
+        cards.append(_exec_playlist_new_cmd(m.group(1).strip()))
+    full_text = PLAYLIST_NEW_PATTERN.sub("", full_text)
+    for m in PLAYLIST_ADD_PATTERN.finditer(full_text):
+        cards.append(_exec_playlist_add_cmd(m.group(1).strip()))
+    full_text = PLAYLIST_ADD_PATTERN.sub("", full_text).strip()
+    return full_text, cards
+
+
 # ── Pydantic 模型 ─────────────────────────────────
 class ConvCreate(BaseModel):
     title: str = "新对话"
@@ -1069,6 +1142,7 @@ async def edit_resend_message(msg_id: str, body: MsgEditResend):
                     except Exception:
                         pass
                 full_text = MUSIC_CMD_PATTERN.sub("", full_text).strip()
+            full_text, mgmt_cards = _handle_music_mgmt_cmds(full_text)
 
             toy_matches = TOY_CMD_PATTERN.findall(full_text)
             if toy_matches:
@@ -1117,6 +1191,7 @@ async def edit_resend_message(msg_id: str, body: MsgEditResend):
                 full_text = clean_song_visible_reply(full_text)
 
             full_text = await process_schedule_commands(full_text, conv_id, after_msg_id=ai_msg_id)
+            full_text = await process_todo_commands(full_text, conv_id, after_msg_id=ai_msg_id)
             full_text = await _process_home_commands(full_text)
             full_text, luckin_results = await handle_luckin_commands(full_text)
 
@@ -1257,6 +1332,9 @@ async def edit_resend_message(msg_id: str, body: MsgEditResend):
                 await _q.put(music_data)
                 await manager.broadcast({"type": "music", "data": music_data})
                 await _music_sys_msg(conv_id, music_cards)
+            if mgmt_cards:
+                for _mc in mgmt_cards:
+                    await manager.broadcast({"type": "music_mgmt", "data": _mc})
 
             if image_gen_prompt:
                 ig_data = {'type': 'image_gen_start', 'conv_id': conv_id, 'msg_id': ai_msg_id, 'is_selfie': image_gen_is_selfie}
@@ -1604,6 +1682,7 @@ async def send_message(conv_id: str, body: MsgCreate):
                     except Exception:
                         pass
                 full_text = MUSIC_CMD_PATTERN.sub("", full_text).strip()
+            full_text, mgmt_cards = _handle_music_mgmt_cmds(full_text)
 
             # 检测 [TOY:x] 指令
             toy_matches = TOY_CMD_PATTERN.findall(full_text)
@@ -1659,6 +1738,7 @@ async def send_message(conv_id: str, body: MsgCreate):
             if song_gen_prompt:
                 full_text = clean_song_visible_reply(full_text)
             full_text = await process_schedule_commands(full_text, conv_id, after_msg_id=ai_msg_id)
+            full_text = await process_todo_commands(full_text, conv_id, after_msg_id=ai_msg_id)
             full_text = await _process_home_commands(full_text)
             full_text, luckin_results = await handle_luckin_commands(full_text)
 
@@ -1850,6 +1930,9 @@ async def send_message(conv_id: str, body: MsgCreate):
                 await _q.put(music_data)
                 await manager.broadcast({"type": "music", "data": music_data})
                 await _music_sys_msg(conv_id, music_cards)
+            if mgmt_cards:
+                for _mc in mgmt_cards:
+                    await manager.broadcast({"type": "music_mgmt", "data": _mc})
 
             if image_gen_prompt:
                 ig_data = {'type': 'image_gen_start', 'conv_id': conv_id, 'msg_id': ai_msg_id, 'is_selfie': image_gen_is_selfie}
@@ -2581,6 +2664,7 @@ async def regenerate_message(conv_id: str, context_limit: int = 30, whisper_mode
                     except Exception:
                         pass
                 full_text = MUSIC_CMD_PATTERN.sub("", full_text).strip()
+            full_text, mgmt_cards = _handle_music_mgmt_cmds(full_text)
 
             # 检测 [TOY:x] 指令
             toy_matches = TOY_CMD_PATTERN.findall(full_text)
@@ -2636,6 +2720,7 @@ async def regenerate_message(conv_id: str, context_limit: int = 30, whisper_mode
             if song_gen_prompt:
                 full_text = clean_song_visible_reply(full_text)
             full_text = await process_schedule_commands(full_text, conv_id, after_msg_id=ai_msg_id)
+            full_text = await process_todo_commands(full_text, conv_id, after_msg_id=ai_msg_id)
             full_text = await _process_home_commands(full_text)
             full_text, luckin_results = await handle_luckin_commands(full_text)
 
@@ -2788,6 +2873,9 @@ async def regenerate_message(conv_id: str, context_limit: int = 30, whisper_mode
                 await _q.put(music_data)
                 await manager.broadcast({"type": "music", "data": music_data})
                 await _music_sys_msg(conv_id, music_cards)
+            if mgmt_cards:
+                for _mc in mgmt_cards:
+                    await manager.broadcast({"type": "music_mgmt", "data": _mc})
 
             if image_gen_prompt:
                 ig_data = {'type': 'image_gen_start', 'conv_id': conv_id, 'msg_id': ai_msg_id, 'is_selfie': image_gen_is_selfie}

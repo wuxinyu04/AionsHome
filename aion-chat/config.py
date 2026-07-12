@@ -44,7 +44,7 @@ def load_settings():
     if SETTINGS_PATH.exists():
         with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
             return json.load(f)
-    keys = {"gemini_key": "", "siliconflow_key": "", "gemini_free_key": "", "aipro_key": ""}
+    keys = {"gemini_key": "", "siliconflow_key": "", "gemini_free_key": "", "aipro_key": "", "minimax_key": ""}
     txt = BASE_DIR.parent / "所需要的API.txt"
     if txt.exists():
         with open(txt, "r", encoding="utf-8") as f:
@@ -71,6 +71,8 @@ def get_key(provider: str) -> str:
         return SETTINGS.get("aipro_key", "")
     if provider == "senseaudio":
         return SETTINGS.get("senseaudio_key", "")
+    if provider == "minimax":
+        return SETTINGS.get("minimax_key", "")
     return SETTINGS.get("siliconflow_key", "")
 
 

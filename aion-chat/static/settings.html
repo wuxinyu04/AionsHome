@@ -558,15 +558,24 @@ body[data-theme="light"] .avatar-preview {
           <select class="form-input" id="ttsProviderSelect">
             <option value="siliconflow">硅基流动（CosyVoice2，0.5元/万字符）</option>
             <option value="senseaudio">SenseAudio（senseaudio-tts-1.5，3.5元/万字符）</option>
+            <option value="minimax">MiniMax（speech-2.6-turbo，系统音色）</option>
           </select>
         </div>
         <div class="field">
           <label class="form-label">SenseAudio API Key（选 SenseAudio 时必填）</label>
           <input class="form-input mono-input" type="text" id="senseaudioKeyInput" placeholder="senseaudio.cn → API 密钥 获取" autocomplete="off">
         </div>
+        <div class="field">
+          <label class="form-label">MiniMax API Key（选 MiniMax 时必填）</label>
+          <input class="form-input mono-input" type="text" id="minimaxKeyInput" placeholder="platform.minimax.io → Account → API Keys 获取" autocomplete="off">
+        </div>
         <div class="field full">
           <label class="form-label">网易云 MUSIC_U Cookie（VIP 点歌）</label>
           <input class="form-input mono-input" type="text" id="neteaseMusicUInput" placeholder="浏览器 F12 → Cookie → MUSIC_U" autocomplete="off">
+        </div>
+        <div class="field full">
+          <label class="form-label">网易云 UID（读你的歌单/红心用）</label>
+          <input class="form-input mono-input" type="text" id="neteaseUidInput" placeholder="如 554020653，主页 URL ?id= 后那串数字" autocomplete="off">
         </div>
       </div>
     </details>
@@ -1154,7 +1163,9 @@ function collectAntigravityModels() {
   $("sfKeyInput").value = s.siliconflow_key || "";
   $("ttsProviderSelect").value = s.tts_provider || "siliconflow";
   $("senseaudioKeyInput").value = s.senseaudio_key || "";
+  $("minimaxKeyInput").value = s.minimax_key || "";
   $("neteaseMusicUInput").value = s.netease_music_u || "";
+  $("neteaseUidInput").value = s.netease_uid || "";
   $("luckinMcpEnabledInput").checked = !!s.luckin_mcp_enabled;
   $("luckinMcpTokenInput").value = s.luckin_mcp_token || "";
   $("luckinLongitudeInput").value = s.luckin_default_longitude || "";
@@ -1197,7 +1208,9 @@ async function saveSettings() {
     siliconflow_key: $("sfKeyInput").value.trim(),
     tts_provider: $("ttsProviderSelect").value,
     senseaudio_key: $("senseaudioKeyInput").value.trim(),
+    minimax_key: $("minimaxKeyInput").value.trim(),
     netease_music_u: $("neteaseMusicUInput").value.trim(),
+    netease_uid: $("neteaseUidInput").value.trim(),
     luckin_mcp_enabled: $("luckinMcpEnabledInput").checked,
     luckin_mcp_token: $("luckinMcpTokenInput").value.trim(),
     luckin_default_longitude: $("luckinLongitudeInput").value.trim(),

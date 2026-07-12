@@ -42,6 +42,7 @@ from schedule import (
     process_schedule_commands, ALARM_CMD, REMINDER_CMD, MONITOR_CMD,
     SCHEDULE_DEL_CMD, SCHEDULE_LIST_CMD, _parse_dt, _is_schedule_time_stale,
 )
+from todos import process_todo_commands
 from music import search_songs, get_audio_url
 from camera import cam, CAM_CHECK_CMD
 from luckin import handle_luckin_commands, luckin_payment_attachments
@@ -410,6 +411,7 @@ async def _process_chatroom_commands(full_text: str, room_id: str, who: str, msg
             pass
     _origin = "connor" if who.lower() == "connor" else "aion"
     full_text = await process_schedule_commands(full_text, None, origin=_origin, origin_room_id=room_id)
+    full_text = await process_todo_commands(full_text, None, origin=_origin, origin_room_id=room_id)
 
     # ── 智能家居 ──
     from routes.chat import _process_home_commands

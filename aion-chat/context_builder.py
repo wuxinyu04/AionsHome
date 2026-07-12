@@ -8,9 +8,10 @@ from datetime import datetime
 
 import aiosqlite
 
-from config import load_worldbook
+from config import load_worldbook, SETTINGS
 from database import get_db
 from schedule import get_active_schedules, build_schedule_prompt
+from todos import get_active_todos, build_todo_prompt
 from luckin import LUCKIN_CMD_PATTERN
 from song_gen import SONG_CMD_PATTERN
 from capabilities import (
@@ -199,6 +200,11 @@ async def build_ability_block(
         schedule_text = build_schedule_prompt(schedules)
         parts.append(f"【当前日程列表】\n{schedule_text}")
 
+    if is_capability_enabled("todo"):
+        todos = await get_active_todos()
+        todo_text = build_todo_prompt(todos)
+        parts.append(f"【当前待办清单】\n{todo_text}")
+
     if is_capability_enabled("location_context"):
         try:
             from location import format_location_for_prompt, load_location_config
@@ -226,6 +232,19 @@ async def build_ability_block(
                 names = " / ".join(f"《{s.get('name','')}》- {s.get('artist','')}" for s in shared if s.get("name"))
                 if names:
                     parts.append(f"【最近一起听过的歌】\n{names}")
+            # 注入用户歌单名（读缓存，无缓存不触发网络），让 AI 知道能往哪个歌单加歌
+            uid = (SETTINGS.get("netease_uid") or "").strip()
+            if uid:
+                try:
+                    uid_int = int(uid)
+                except (TypeError, ValueError):
+                    uid_int = None
+                if uid_int:
+                    pls = playback.get_playlists_cache(uid_int)
+                    if pls:
+                        pnames = " / ".join(p.get("name", "") for p in pls if p.get("name"))
+                        if pnames:
+                            parts.append(f"【你的歌单】\n{pnames}")
         except Exception:
             pass
 
