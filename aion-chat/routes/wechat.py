@@ -25,6 +25,7 @@ class WeChatInbound(BaseModel):
     context_limit: int = 30
     model: str = DEFAULT_MODEL
     connor_model: str = "Codex"
+    wechat_reply: bool = False
 
 
 def _normalize_source_type(source_type: str) -> str:
@@ -64,6 +65,66 @@ async def _drain_streaming_response(response) -> None:
         return
     async for _ in iterator:
         pass
+
+
+async def _capture_and_reply_wechat(response, source_type: str, source_id: str) -> None:
+    """捕获 AI 流式回复全文，发送到微信（微信发微信回）"""
+    import json as _json
+    from wechat_bridge import dispatch_wechat_message, extract_wechat_messages
+
+    iterator = getattr(response, "body_iterator", None)
+    print(f"[WECHAT_CAPTURE] start source_type={source_type} source_id={source_id} has_iterator={iterator is not None}")
+    if iterator is None:
+        return
+    tokens: list[str] = []
+    chunk_count = 0
+    sample_lines: list[str] = []
+    async for chunk in iterator:
+        chunk_count += 1
+        if isinstance(chunk, str):
+            for line in chunk.split("\n"):
+                if line.startswith("data: "):
+                    if len(sample_lines) < 5:
+                        sample_lines.append(line[:200])
+                    try:
+                        data = _json.loads(line[6:])
+                        if data.get("type") == "token":
+                            tokens.append(data.get("content", ""))
+                        elif isinstance(data, dict) and "content" in data:
+                            tokens.append(str(data["content"]))
+                    except Exception as exc:
+                        if len(sample_lines) < 5:
+                            sample_lines.append(f"[parse err: {exc}]")
+    print(f"[WECHAT_CAPTURE] samples={sample_lines}")
+    full_text = "".join(tokens).strip()
+    print(f"[WECHAT_CAPTURE] drained chunks={chunk_count} tokens={len(tokens)} text_len={len(full_text)} preview={full_text[:60]!r}")
+    if not full_text:
+        return
+    # 1) 剥离 [微信消息：...] 指令（它们已由 _process_private_wechat_commands 单独发送）
+    cleaned, _ = extract_wechat_messages(full_text)
+    # 2) 剥离 <emotion>...</emotion> 情感标签（前端内部标记，微信不需要）
+    import re as _re
+    cleaned = _re.sub(r"<emotion>[^<]*</emotion>", "", cleaned).strip()
+    if not cleaned:
+        return
+    # 3) 按段落切分（\n\n 或 \n），每段单独发一条微信，模拟前端气泡效果
+    paragraphs = _re.split(r"\n{2,}|\n", cleaned)
+    paragraphs = [p.strip() for p in paragraphs if p.strip()]
+    if not paragraphs:
+        return
+    print(f"[WECHAT_CAPTURE] split into {len(paragraphs)} paragraph(s)")
+    for idx, para in enumerate(paragraphs):
+        print(f"[WECHAT_CAPTURE] sending part {idx+1}/{len(paragraphs)} len={len(para)} preview={para[:40]!r}")
+        result = await dispatch_wechat_message(
+            content=para,
+            source_type=source_type,
+            source_id=source_id,
+            sender="aion",
+            source_msg_id="",
+        )
+        print(f"[WECHAT_CAPTURE] part {idx+1} result={result}")
+        if idx < len(paragraphs) - 1:
+            await asyncio.sleep(0.6)  # 多条之间留点间隔，模拟气泡节奏
 
 
 async def _save_private_user_message(conv_id: str, content: str) -> dict:
@@ -115,7 +176,10 @@ async def receive_wechat_message(body: WeChatInbound, authorization: str | None 
                     client_id="wechat",
                 ),
             )
-            asyncio.create_task(_drain_streaming_response(response))
+            if body.wechat_reply:
+                asyncio.create_task(_capture_and_reply_wechat(response, source_type, source_id))
+            else:
+                asyncio.create_task(_drain_streaming_response(response))
             return {"ok": True, "source_type": source_type, "source_id": source_id, "auto_reply": True}
 
         msg = await _save_private_user_message(source_id, content)
@@ -133,7 +197,10 @@ async def receive_wechat_message(body: WeChatInbound, authorization: str | None 
                     connor_model=body.connor_model or "Codex",
                 ),
             )
-            asyncio.create_task(_drain_streaming_response(response))
+            if body.wechat_reply:
+                asyncio.create_task(_capture_and_reply_wechat(response, source_type, source_id))
+            else:
+                asyncio.create_task(_drain_streaming_response(response))
             return {"ok": True, "source_type": source_type, "source_id": source_id, "auto_reply": True}
 
         msg = await chatroom_routes._save_msg(source_id, "user", content, attachments=[])

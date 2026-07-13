@@ -63,6 +63,7 @@ async def _default_inbound_handler(**kwargs: Any) -> Any:
         source_type=kwargs["source_type"],
         source_id=kwargs["source_id"],
         auto_reply=bool(kwargs.get("auto_reply", True)),
+        wechat_reply=True,
     )
     return await receive_wechat_message(body, authorization=None)
 
