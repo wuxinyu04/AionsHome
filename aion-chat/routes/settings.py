@@ -538,46 +538,64 @@ _MINIMAX_SYSTEM_VOICES = [
     {"uri": "male-qn-badao", "customName": "霸道青年（强气男友）"},
     {"uri": "Chinese (Mandarin)_Gentleman", "customName": "温润男声（温柔绅士）"},
     {"uri": "Chinese (Mandarin)_Pure-hearted_Boy", "customName": "清澈邻家弟弟"},
+    {"uri": "Chinese (Mandarin)_Unrestrained_Young_Man", "customName": "不羁青年（洒脱外向）"},
+    {"uri": "Chinese (Mandarin)_Stubborn_Friend", "customName": "嘴硬竹马（傲娇竹马）"},
     {"uri": "lengdan_xiongzhang", "customName": "冷淡学长（冷都男友）"},
 ]
 
 
 async def _list_senseaudio_voices(key: str) -> dict:
-    """调 SenseAudio /v1/get_voice 拉音色列表；失败/空时回退 Free 版音色。"""
+    """调 SenseAudio /v1/get_voice 拉音色列表；失败/空时回退 Free 版音色。
+
+    返回三类可用音色：
+    - 沙哑青年 male_0018_a：system 中唯一保留的免费男声（儒雅道长太老、萌娃是儿童声，按用户要求都不进下拉）
+    - voice_generation：用户用提示词生成的音色（温叙远低沉/男友等）
+    - voice_cloning：用户上传音频复刻的音色（当前 0，未来自动出现）
+
+    注意：必须传 voice_type="all" 才能同时拿到这三类；传 "system" 时 generation/cloning 都是空数组。
+    """
     try:
         async with httpx.AsyncClient(timeout=15, trust_env=False) as client:
             resp = await client.post(
                 "https://api.senseaudio.cn/v1/get_voice",
                 headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-                json={"voice_type": "system"},
+                json={"voice_type": "all"},
             )
         if resp.status_code != 200:
             return {"voices": _SENSEAUDIO_FREE_VOICES, "note": f"获取音色列表失败({resp.status_code})，已回退免费音色"}
         data = resp.json()
-        # SenseAudio 返回 {system_voice:[{voice_id,voice_name,...}], voice_cloning:[], voice_generation:[]}
-        items = data.get("system_voice") or data.get("data") or data.get("result") or data.get("voices") or []
-        # 同一 voice_name 有多个后缀变体(a/b/c...，对应不同情绪)，前端会显示成重复项。
-        # 按 voice_name 去重：Free 版可用的变体优先，否则取第一个；标注可用/可能受限。
-        by_name: dict[str, dict] = {}
-        for it in items:
+        system = data.get("system_voice") or []
+        generation = data.get("voice_generation") or []
+        cloning = data.get("voice_cloning") or []
+
+        voices = []
+        # 1. system：只保留沙哑青年 male_0018_a（用户指定唯一系统音色）
+        for it in system:
             if not isinstance(it, dict):
                 continue
-            vid = it.get("voice_id") or it.get("id") or ""
+            vid = it.get("voice_id") or ""
+            if vid == "male_0018_a":
+                voices.append({"uri": vid, "customName": it.get("voice_name") or "沙哑青年"})
+                break
+
+        # 2. voice_generation：用户用提示词生成的全部音色
+        for it in generation:
+            if not isinstance(it, dict):
+                continue
+            vid = it.get("voice_id") or ""
             if not vid:
                 continue
-            vname = it.get("voice_name") or it.get("name") or vid
-            existing = by_name.get(vname)
-            if existing is None:
-                by_name[vname] = {"vid": vid, "free": vid in _SENSEAUDIO_FREE_VOICE_IDS}
-            elif vid in _SENSEAUDIO_FREE_VOICE_IDS and not by_name[vname]["free"]:
-                # 已有同名但非 Free 变体，换成 Free 版可用的
-                by_name[vname] = {"vid": vid, "free": True}
-        voices = []
-        for vname, info in by_name.items():
-            tag = "" if info["free"] else "（可能受限）"
-            voices.append({"uri": info["vid"], "customName": f"{vname}{tag}"})
-        # Free 版可用的音色排最前
-        voices.sort(key=lambda v: 0 if "(可能受限)" not in v["customName"] else 1)
+            voices.append({"uri": vid, "customName": it.get("voice_name") or vid})
+
+        # 3. voice_cloning：用户复刻的全部音色（当前 0，未来自动出现）
+        for it in cloning:
+            if not isinstance(it, dict):
+                continue
+            vid = it.get("voice_id") or ""
+            if not vid:
+                continue
+            voices.append({"uri": vid, "customName": it.get("voice_name") or vid})
+
         if not voices:
             voices = _SENSEAUDIO_FREE_VOICES
         return {"voices": voices}
@@ -605,6 +623,20 @@ async def _list_minimax_voices(key: str) -> dict:
     return {"voices": _MINIMAX_SYSTEM_VOICES}
 
 
+# Edge TTS 精选中文音色（微软 Azure 神经语音，免费无需 key）
+# 直接硬编码 curated 列表，避免去拉全量几百个多语种音色污染下拉。
+# 注意：edge-tts 7.x 实际只有 6 个 zh-CN 音色，其他音色 ID 会 NoAudioReceived 错误。
+# 想扩展（克隆声 / 多语种）再补。
+_EDGE_SYSTEM_VOICES = [
+    {"uri": "zh-CN-XiaoxiaoNeural", "customName": "⭐ 晓晓（女·温暖亲切，免费中文女声天花板）"},
+    {"uri": "zh-CN-XiaoyiNeural", "customName": "晓伊（女·活泼俏皮）"},
+    {"uri": "zh-CN-YunxiNeural", "customName": "⭐ 云希（男·阳光亲切，伴侣场景推荐）"},
+    {"uri": "zh-CN-YunjianNeural", "customName": "云健（男·运动感）"},
+    {"uri": "zh-CN-YunxiaNeural", "customName": "云夏（男·可爱系）"},
+    {"uri": "zh-CN-YunyangNeural", "customName": "云扬（男·新闻播报）"},
+]
+
+
 @router.get("/api/tts/voices")
 async def tts_voice_list():
     from config import get_tts_provider
@@ -619,6 +651,9 @@ async def tts_voice_list():
         if not key:
             return {"voices": [], "error": "未配置 MiniMax API Key"}
         return await _list_minimax_voices(key)
+    if provider == "edge":
+        # 无需 API Key，直接返回 curated 列表
+        return {"voices": _EDGE_SYSTEM_VOICES}
     # 默认硅基流动
     key = get_key("siliconflow")
     if not key:
