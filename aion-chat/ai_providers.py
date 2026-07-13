@@ -567,7 +567,9 @@ async def call_aipro(messages: list, model: str, meta: dict | None = None, tempe
         async with client.stream("POST", url, json=payload, headers=headers) as resp:
             if resp.status_code != 200:
                 body = await resp.aread()
-                yield _decode_relay_body(body)
+                _err = _decode_relay_body(body)
+                # 响应体为空时必须有可见错误，否则整条回复会静默变空（火山错配 URL 曾因此表现成空白气泡且无报错）
+                yield _err or f"[HTTP {resp.status_code}] 请求失败且响应体为空——请检查 base_url/网络"
                 return
             async for line in resp.aiter_lines():
                 data = _openai_sse_data(line)
@@ -602,7 +604,9 @@ def _openai_chat_completions_url(base_url: str) -> str:
         return ""
     if base.endswith("/chat/completions"):
         return base
-    if base.endswith("/v1"):
+    # 以 /v1 /v2 /v3 ... 结尾的 OpenAI 兼容端点（火山方舟 /api/v3、/api/coding/v3 等）直接拼 /chat/completions，
+    # 不能再套 /v1 —— 否则变成 /coding/v3/v1/chat/completions，火山返回 404 且空 body，整条 AI 回复会静默变空。
+    if re.search(r"/v\d+$", base):
         return f"{base}/chat/completions"
     return f"{base}/v1/chat/completions"
 
@@ -628,7 +632,9 @@ async def call_custom_openai(messages: list, cfg: dict, meta: dict | None = None
         async with client.stream("POST", url, json=payload, headers=headers) as resp:
             if resp.status_code != 200:
                 body = await resp.aread()
-                yield _decode_relay_body(body)
+                _err = _decode_relay_body(body)
+                # 响应体为空时必须有可见错误，否则整条回复会静默变空（火山错配 URL 曾因此表现成空白气泡且无报错）
+                yield _err or f"[HTTP {resp.status_code}] 请求失败且响应体为空——请检查 base_url/网络"
                 return
             async for line in resp.aiter_lines():
                 data = _openai_sse_data(line)
