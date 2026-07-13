@@ -90,19 +90,57 @@ _EMOTION_PATTERN = re.compile(r'<emotion>([^<]+)</emotion>')
 _VALID_EMOTIONS = {"happy", "sad", "angry", "fearful", "disgusted", "surprised", "calm", "fluent", "whisper"}
 _DEFAULT_EMOTION = "calm"
 
+# 后端情绪推断：AI 不打 <emotion> 标签时（或者标签非法），
+# 后端从纯文本里扫关键词/标点挑一个。这是"隐式"的真正落地点 —
+# 即使 AI 完全忘了写 emotion 标签，TTS 仍能给 MiniMax 带一个合理的语气，
+# 对接 SenseAudio / Edge / 硅基流动时这条推断照样走（被 _strip_tags 剥掉，行为不变）。
+_EMOTION_KEYWORDS = {
+    "happy":   ("哈哈", "哈哈哈", "嘻嘻", "开心", "高兴", "笑", "嘿嘿", "好耶", "棒", "太好了", "喜欢", "想你了", "爱你", "可爱", "嘿嘿嘿"),
+    "whisper": ("悄悄", "晚安", "嘘", "低声", "小声", "凑近", "耳语", "睡吧"),
+    "angry":   ("讨厌", "滚", "哼", "气死", "过分", "混蛋", "烦死", "找打", "欠收拾"),
+    "sad":     ("难过", "伤心", "哭", "呜呜", "失落", "心疼", "孤单", "想哭", "流泪", "呜呜呜"),
+}
+
+
+def _infer_emotion_from_text(text: str) -> str:
+    """从纯文本里推断一个 emotion。无明显信号 → _DEFAULT_EMOTION。
+
+    实现思路：扫前 400 字（情绪信号通常落在开头），关键词命中数加权，
+    标点（！～）做轻度加成，挑分数最高的；完全没信号 → calm。
+    仅依赖 stdlib，无外部模型依赖，不会延迟 TTS。
+    """
+    if not text:
+        return _DEFAULT_EMOTION
+    snippet = text[:400]
+    if not snippet:
+        return _DEFAULT_EMOTION
+    scores = {emo: 0 for emo in _EMOTION_KEYWORDS}
+    for emo, keywords in _EMOTION_KEYWORDS.items():
+        for kw in keywords:
+            scores[emo] += snippet.count(kw)
+    # 标点加成：连用「！」多 → 兴奋 happy；连用「～」多 → 拖腔 whisper
+    if snippet.count("！") + snippet.count("!") >= 2:
+        scores["happy"] += 1
+    if snippet.count("～") + snippet.count("~") >= 2:
+        scores["whisper"] += 1
+    best_emo = max(scores.items(), key=lambda kv: kv[1])[0]
+    return best_emo if scores[best_emo] > 0 else _DEFAULT_EMOTION
+
 
 def _extract_emotion(text: str) -> tuple[str, str]:
-    """从文本里抽 <emotion>X</emotion>。返回 (emotion_or_default, 去掉标签后的 text)。
-    AI 标错或没标都回退到 _DEFAULT_EMOTION，避免 MiniMax 报业务错误。"""
+    """从文本里抽 <emotion>X</emotion>；没有或非法时让后端从纯文本推断一个。
+    返回 (emotion, 去掉标签后的 text)。这样 MiniMax 几乎总能拿到非默认情绪。"""
     if not text:
         return _DEFAULT_EMOTION, text or ""
     m = _EMOTION_PATTERN.search(text)
     if not m:
-        return _DEFAULT_EMOTION, text
+        return _infer_emotion_from_text(text), text
     raw = m.group(1).strip().lower()
-    emotion = raw if raw in _VALID_EMOTIONS else _DEFAULT_EMOTION
     cleaned = _EMOTION_PATTERN.sub('', text).strip()
-    return emotion, cleaned
+    if raw in _VALID_EMOTIONS:
+        return raw, cleaned
+    # 标签写了但内容是乱码——仍走推断
+    return _infer_emotion_from_text(cleaned), cleaned
 
 def _strip_tags(text: str) -> str:
     """去除所有特殊标签，只保留纯文本"""
@@ -248,6 +286,37 @@ async def _request_senseaudio_tts_audio(text: str, voice: str, *, seq: int | Non
     return None
 
 
+async def _request_edge_tts_audio(text: str, voice: str, *, seq: int | None = None) -> bytes | None:
+    """Edge TTS（微软 Azure 神经语音免费逆向接口）合成。
+    无需 API Key；接口本身流式，攒成完整 MP3 bytes 返回以保持上游签名一致。
+    无 emotion 字段，参数被上游丢弃即可。
+    """
+    if not voice:
+        log.warning("Edge TTS: 未选择音色，跳过合成 seq=%s", seq)
+        return None
+    try:
+        import edge_tts
+    except ImportError:
+        log.warning("Edge TTS: 缺少 edge-tts 包，请 pip install edge-tts seq=%s", seq)
+        return None
+    for attempt in range(3):
+        try:
+            communicate = edge_tts.Communicate(text, voice)
+            audio = bytearray()
+            async for chunk in communicate.stream():
+                if chunk.get("type") == "audio":
+                    data = chunk.get("data")
+                    if data:
+                        audio.extend(data)
+            if audio:
+                return bytes(audio)
+            log.warning("Edge TTS: 流式响应无音频数据 seq=%s attempt=%d", seq, attempt + 1)
+        except Exception as e:
+            log.warning("Edge TTS 请求异常: %s seq=%s attempt=%d", e, seq, attempt + 1)
+        await asyncio.sleep(0.5 * (attempt + 1))
+    return None
+
+
 async def _request_minimax_tts_audio(text: str, voice: str, *, seq: int | None = None, emotion: str = _DEFAULT_EMOTION) -> bytes | None:
     """MiniMax T2A v2 合成。响应里音频是 hex 编码字符串，需 fromhex 解码。"""
     key = get_key("minimax")
@@ -309,6 +378,9 @@ async def _request_tts_audio(text: str, voice: str, *, seq: int | None = None, e
         return await _request_senseaudio_tts_audio(text, voice, seq=seq)
     if provider == "minimax":
         return await _request_minimax_tts_audio(text, voice, seq=seq, emotion=emotion)
+    if provider == "edge":
+        # Edge TTS 无 emotion 字段，丢掉；无需 API Key
+        return await _request_edge_tts_audio(text, voice, seq=seq)
     key = get_key("siliconflow")
     if not key:
         log.warning("TTS: 无硅基流动 API Key，跳过合成 seq=%s", seq)
@@ -449,7 +521,8 @@ class TTSStreamer:
         self._tasks: list[asyncio.Task] = []
         self._segment_paths: dict[int, Path] = {}
         self._merge_segments = merge_segments
-        self._emotion = _DEFAULT_EMOTION  # 由 AI 在回复开头 <emotion>X</emotion> 自标
+        self._emotion = _DEFAULT_EMOTION  # 优先吃 AI 自标；没标就让后端从 buffer 推断
+        self._emotion_locked = False       # True 后本条消息后续 chunk 不再重推断
         self._delete_segments_after_seconds = delete_segments_after_seconds
         self._cache_max_bytes = cache_max_bytes
 
@@ -467,14 +540,21 @@ class TTSStreamer:
         """喂入 AI 流式 chunk，检测到可切分的句子就异步发起合成"""
         if not chunk:
             return
-        # 第一次见到 <emotion>X</emotion> 就锁定 emotion，并从 chunk 里抹掉，避免进 buffer
-        if self._emotion == _DEFAULT_EMOTION:
+        # 优先让 AI 自标的 <emotion> 锁定；没标就让后端从已积累的 buffer 推断一次，
+        # 命中非默认信号后再锁。锁了之后本条消息剩下的 chunk 都用这个 emotion。
+        if not self._emotion_locked:
             m = _EMOTION_PATTERN.search(chunk)
             if m:
                 raw = m.group(1).strip().lower()
                 if raw in _VALID_EMOTIONS:
                     self._emotion = raw
+                    self._emotion_locked = True
                     chunk = _EMOTION_PATTERN.sub('', chunk)
+            else:
+                inferred = _infer_emotion_from_text(self._buffer + chunk)
+                if inferred != _DEFAULT_EMOTION:
+                    self._emotion = inferred
+                    self._emotion_locked = True
         self._buffer += chunk
         self._try_split()
 

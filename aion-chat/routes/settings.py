@@ -630,10 +630,11 @@ async def _list_minimax_voices(key: str) -> dict:
 _EDGE_SYSTEM_VOICES = [
     {"uri": "zh-CN-XiaoxiaoNeural", "customName": "⭐ 晓晓（女·温暖亲切，免费中文女声天花板）"},
     {"uri": "zh-CN-XiaoyiNeural", "customName": "晓伊（女·活泼俏皮）"},
-    {"uri": "zh-CN-YunxiNeural", "customName": "⭐ 云希（男·阳光亲切，伴侣场景推荐）"},
+    {"uri": "zh-CN-YunxiNeural", "customName": "云希（男·阳光亲切）"},
     {"uri": "zh-CN-YunjianNeural", "customName": "云健（男·运动感）"},
     {"uri": "zh-CN-YunxiaNeural", "customName": "云夏（男·可爱系）"},
     {"uri": "zh-CN-YunyangNeural", "customName": "云扬（男·新闻播报）"},
+    {"uri": "zh-TW-YunJheNeural", "customName": "⭐ 云哲（男·成熟自然，台湾男声伴侣推荐）"},
 ]
 
 
