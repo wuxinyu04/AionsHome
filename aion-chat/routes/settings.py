@@ -501,13 +501,130 @@ async def theater_tts_audio(msg_id: str):
         return Response(status_code=404)
     return FileResponse(cache_path, media_type="audio/mpeg", filename=f"{safe_id}.mp3")
 
+# CosyVoice2 系统预置音色。硅基的 /v1/audio/voice/list 只返回用户克隆音色，
+# 不含系统音色——账号没克隆过时返回空，导致前端音色下拉没选项、TTS 无法触发。
+# 这里作为兜底，列表为空时补上这些免费可用的系统音色（实测 alex/claire 等可直接合成）。
+_COSYVOICE2_SYSTEM_VOICES = [
+    {"uri": "FunAudioLLM/CosyVoice2-0.5B:alex", "name": "Alex（男）"},
+    {"uri": "FunAudioLLM/CosyVoice2-0.5B:benjamin", "name": "Benjamin（男）"},
+    {"uri": "FunAudioLLM/CosyVoice2-0.5B:charles", "name": "Charles（男）"},
+    {"uri": "FunAudioLLM/CosyVoice2-0.5B:claire", "name": "Claire（女）"},
+    {"uri": "FunAudioLLM/CosyVoice2-0.5B:david", "name": "David（男）"},
+    {"uri": "FunAudioLLM/CosyVoice2-0.5B:diana", "name": "Diana（女）"},
+]
+
+# SenseAudio Free 版（实名后默认）可调用的普通音色。当 /v1/get_voice 接口失败或返回空时兜底。
+_SENSEAUDIO_FREE_VOICES = [
+    {"uri": "child_0001_a", "customName": "可爱萌娃（开心）"},
+    {"uri": "child_0001_b", "customName": "可爱萌娃（平稳）"},
+    {"uri": "male_0004_a", "customName": "儒雅道长（平稳）"},
+    {"uri": "male_0018_a", "customName": "沙哑青年（深情）"},
+]
+
+
+# SenseAudio Free 版（实名后默认）可直接调用的 voice_id 集合（来自官方文档音色列表页）。
+# 其他音色可能需要 Plus/Pro 等更高套餐，调了会报权限错误。
+_SENSEAUDIO_FREE_VOICE_IDS = {"child_0001_a", "child_0001_b", "male_0004_a", "male_0018_a"}
+
+
+# MiniMax 系统音色 —— 男友陪伴向精选（8 个中文男声）
+# 砍到只保留中文男声，所有显示名都是中文，下拉一目了然不再翻不到。
+# 后续想扩展（克隆声/新增声）再补。
+_MINIMAX_SYSTEM_VOICES = [
+    {"uri": "junlang_nanyou", "customName": "⭐ 俊朗男友（名字就是男友）"},
+    {"uri": "male-qn-jingying", "customName": "精英青年（磁性主流）"},
+    {"uri": "male-qn-qingse", "customName": "青涩青年（清朗少年）"},
+    {"uri": "male-qn-daxuesheng", "customName": "青年大学生（校园感）"},
+    {"uri": "male-qn-badao", "customName": "霸道青年（强气男友）"},
+    {"uri": "Chinese (Mandarin)_Gentleman", "customName": "温润男声（温柔绅士）"},
+    {"uri": "Chinese (Mandarin)_Pure-hearted_Boy", "customName": "清澈邻家弟弟"},
+    {"uri": "lengdan_xiongzhang", "customName": "冷淡学长（冷都男友）"},
+]
+
+
+async def _list_senseaudio_voices(key: str) -> dict:
+    """调 SenseAudio /v1/get_voice 拉音色列表；失败/空时回退 Free 版音色。"""
+    try:
+        async with httpx.AsyncClient(timeout=15, trust_env=False) as client:
+            resp = await client.post(
+                "https://api.senseaudio.cn/v1/get_voice",
+                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                json={"voice_type": "system"},
+            )
+        if resp.status_code != 200:
+            return {"voices": _SENSEAUDIO_FREE_VOICES, "note": f"获取音色列表失败({resp.status_code})，已回退免费音色"}
+        data = resp.json()
+        # SenseAudio 返回 {system_voice:[{voice_id,voice_name,...}], voice_cloning:[], voice_generation:[]}
+        items = data.get("system_voice") or data.get("data") or data.get("result") or data.get("voices") or []
+        # 同一 voice_name 有多个后缀变体(a/b/c...，对应不同情绪)，前端会显示成重复项。
+        # 按 voice_name 去重：Free 版可用的变体优先，否则取第一个；标注可用/可能受限。
+        by_name: dict[str, dict] = {}
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            vid = it.get("voice_id") or it.get("id") or ""
+            if not vid:
+                continue
+            vname = it.get("voice_name") or it.get("name") or vid
+            existing = by_name.get(vname)
+            if existing is None:
+                by_name[vname] = {"vid": vid, "free": vid in _SENSEAUDIO_FREE_VOICE_IDS}
+            elif vid in _SENSEAUDIO_FREE_VOICE_IDS and not by_name[vname]["free"]:
+                # 已有同名但非 Free 变体，换成 Free 版可用的
+                by_name[vname] = {"vid": vid, "free": True}
+        voices = []
+        for vname, info in by_name.items():
+            tag = "" if info["free"] else "（可能受限）"
+            voices.append({"uri": info["vid"], "customName": f"{vname}{tag}"})
+        # Free 版可用的音色排最前
+        voices.sort(key=lambda v: 0 if "(可能受限)" not in v["customName"] else 1)
+        if not voices:
+            voices = _SENSEAUDIO_FREE_VOICES
+        return {"voices": voices}
+    except Exception as e:
+        return {"voices": _SENSEAUDIO_FREE_VOICES, "note": f"音色列表请求异常：{e}，已回退免费音色"}
+
+
+async def _list_minimax_voices(key: str) -> dict:
+    """返回 MiniMax 男友向精选音色列表（固定 8 个中文男声）。
+
+    不再去 /v1/get_voice 拉全量 —— 那个接口返回 327 个混合多语种，下拉翻不完，
+    而且 voice_name 可能是英文。本项目的男友向场景只需要中文男声，硬编码 curated 列表
+    体验更好；后续想扩展（克隆声/新增系统声）再合并即可。
+    """
+    # 顺手用一下 key 做个连通性检测，避免 key 失效时没有任何反馈
+    try:
+        async with httpx.AsyncClient(timeout=10, trust_env=False) as client:
+            await client.post(
+                "https://api.minimax.io/v1/get_voice",
+                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                json={"voice_type": "system"},
+            )
+    except Exception:
+        pass  # 探测失败不影响，返回 curated 列表即可
+    return {"voices": _MINIMAX_SYSTEM_VOICES}
+
+
 @router.get("/api/tts/voices")
 async def tts_voice_list():
+    from config import get_tts_provider
+    provider = get_tts_provider()
+    if provider == "senseaudio":
+        key = get_key("senseaudio")
+        if not key:
+            return {"voices": [], "error": "未配置 SenseAudio API Key"}
+        return await _list_senseaudio_voices(key)
+    if provider == "minimax":
+        key = get_key("minimax")
+        if not key:
+            return {"voices": [], "error": "未配置 MiniMax API Key"}
+        return await _list_minimax_voices(key)
+    # 默认硅基流动
     key = get_key("siliconflow")
     if not key:
         return {"voices": [], "error": "未配置硅基流动 API Key"}
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
+        async with httpx.AsyncClient(timeout=15, trust_env=False) as client:
             resp = await client.get(
                 "https://api.siliconflow.cn/v1/audio/voice/list",
                 headers={"Authorization": f"Bearer {key}"}
@@ -516,6 +633,9 @@ async def tts_voice_list():
             return {"voices": [], "error": "获取音色列表失败"}
         data = resp.json()
         voices = data.get("result") or data.get("voices") or data.get("data") or []
+        # 硅基接口只返回用户克隆音色；账号没克隆过时列表为空，补上系统预置音色作兜底。
+        if not voices:
+            voices = _COSYVOICE2_SYSTEM_VOICES
         return {"voices": voices}
     except Exception as e:
         return {"voices": [], "error": str(e)}

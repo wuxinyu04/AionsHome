@@ -74,6 +74,7 @@ _STRIP_PATTERNS = [
     re.compile(r'\[DATE_END_READY\]', re.IGNORECASE),
     re.compile(r'\[悄悄话[：:][^\]]*\]'),
     re.compile(r'<meta>[\s\S]*?</meta>'),
+    re.compile(r'<emotion>[^<]*</emotion>'),
 ]
 
 # 句子结束符（用于切分）
@@ -82,6 +83,26 @@ _COMMA_CHARS = set('，,、；;：:')
 
 _SENTENCE_ENDS |= set('.!?')
 _COMMA_CHARS |= set(',;:')
+
+# MiniMax emotion 合法值（由 AI 在回复开头用 <emotion>X</emotion> 自标）
+# 文档允许：happy/sad/angry/fearful/disgusted/surprised/calm/fluent/whisper
+_EMOTION_PATTERN = re.compile(r'<emotion>([^<]+)</emotion>')
+_VALID_EMOTIONS = {"happy", "sad", "angry", "fearful", "disgusted", "surprised", "calm", "fluent", "whisper"}
+_DEFAULT_EMOTION = "calm"
+
+
+def _extract_emotion(text: str) -> tuple[str, str]:
+    """从文本里抽 <emotion>X</emotion>。返回 (emotion_or_default, 去掉标签后的 text)。
+    AI 标错或没标都回退到 _DEFAULT_EMOTION，避免 MiniMax 报业务错误。"""
+    if not text:
+        return _DEFAULT_EMOTION, text or ""
+    m = _EMOTION_PATTERN.search(text)
+    if not m:
+        return _DEFAULT_EMOTION, text
+    raw = m.group(1).strip().lower()
+    emotion = raw if raw in _VALID_EMOTIONS else _DEFAULT_EMOTION
+    cleaned = _EMOTION_PATTERN.sub('', text).strip()
+    return emotion, cleaned
 
 def _strip_tags(text: str) -> str:
     """去除所有特殊标签，只保留纯文本"""
@@ -181,7 +202,113 @@ def split_text_for_tts(text: str, *, min_chars: int = 300, max_chars: int = 500)
     return segments
 
 
-async def _request_tts_audio(text: str, voice: str, *, seq: int | None = None) -> bytes | None:
+async def _request_senseaudio_tts_audio(text: str, voice: str, *, seq: int | None = None) -> bytes | None:
+    """SenseAudio（商汤）TTS 合成。响应里音频是 hex 编码字符串，需 fromhex 解码。"""
+    key = get_key("senseaudio")
+    if not key:
+        log.warning("SenseAudio TTS: 无 API Key，跳过合成 seq=%s", seq)
+        return None
+    if not voice:
+        log.warning("SenseAudio TTS: 未选择音色，跳过合成 seq=%s", seq)
+        return None
+    payload = {
+        "model": "senseaudio-tts-1.5-260319",
+        "text": text,
+        "stream": False,
+        "voice_setting": {"voice_id": voice, "speed": 1, "vol": 1, "pitch": 0},
+        "audio_setting": {"format": "mp3", "sample_rate": 32000},
+    }
+    for attempt in range(3):
+        try:
+            async with httpx.AsyncClient(timeout=30, trust_env=False) as client:
+                resp = await client.post(
+                    "https://api.senseaudio.cn/v1/t2a_v2",
+                    headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                    json=payload,
+                )
+            if resp.status_code == 200:
+                body = resp.json()
+                # SenseAudio 把业务错误包在 HTTP 200 里：{"base_resp":{"status_code":400,"status_msg":"..."}}
+                base = body.get("base_resp") or {}
+                biz_code = base.get("status_code", 0)
+                if biz_code and biz_code != 0:
+                    log.warning("SenseAudio TTS 业务错误: code=%s msg=%s voice=%s seq=%s attempt=%d",
+                                biz_code, base.get("status_msg"), voice, seq, attempt + 1)
+                else:
+                    data = body.get("data") or {}
+                    hex_audio = data.get("audio") or ""
+                    if hex_audio:
+                        return bytes.fromhex(hex_audio)
+                    log.warning("SenseAudio TTS: 响应无 audio 字段 seq=%s attempt=%d", seq, attempt + 1)
+            else:
+                log.warning("SenseAudio TTS API 错误: status=%d seq=%s attempt=%d", resp.status_code, seq, attempt + 1)
+        except Exception as e:
+            log.warning("SenseAudio TTS 请求异常: %s seq=%s attempt=%d", e, seq, attempt + 1)
+        await asyncio.sleep(0.5 * (attempt + 1))
+    return None
+
+
+async def _request_minimax_tts_audio(text: str, voice: str, *, seq: int | None = None, emotion: str = _DEFAULT_EMOTION) -> bytes | None:
+    """MiniMax T2A v2 合成。响应里音频是 hex 编码字符串，需 fromhex 解码。"""
+    key = get_key("minimax")
+    if not key:
+        log.warning("MiniMax TTS: 无 API Key，跳过合成 seq=%s", seq)
+        return None
+    if not voice:
+        log.warning("MiniMax TTS: 未选择音色，跳过合成 seq=%s", seq)
+        return None
+    payload = {
+        # 男友陪伴向：HD 档拿质量；emotion 由 AI 自标，speed/pitch 保持温和青年男声基调
+        "model": "speech-2.8-hd",
+        "text": text,
+        "stream": False,
+        "voice_setting": {
+            "voice_id": voice,
+            "speed": 1,
+            "vol": 1,
+            "pitch": -1,
+            "emotion": emotion,
+        },
+        "audio_setting": {"format": "mp3", "sample_rate": 32000, "bitrate": 128000},
+    }
+    for attempt in range(3):
+        try:
+            async with httpx.AsyncClient(timeout=30, trust_env=False) as client:
+                resp = await client.post(
+                    "https://api.minimax.io/v1/t2a_v2",
+                    headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                    json=payload,
+                )
+            if resp.status_code == 200:
+                body = resp.json()
+                # MiniMax 把业务错误包在 HTTP 200 里：{"base_resp":{"status_code":1004,"status_msg":"..."}}
+                base = body.get("base_resp") or {}
+                biz_code = base.get("status_code", 0)
+                if biz_code and biz_code != 0:
+                    log.warning("MiniMax TTS 业务错误: code=%s msg=%s voice=%s seq=%s attempt=%d",
+                                biz_code, base.get("status_msg"), voice, seq, attempt + 1)
+                else:
+                    data = body.get("data") or {}
+                    hex_audio = data.get("audio") or ""
+                    if hex_audio:
+                        return bytes.fromhex(hex_audio)
+                    log.warning("MiniMax TTS: 响应无 audio 字段 seq=%s attempt=%d", seq, attempt + 1)
+            else:
+                log.warning("MiniMax TTS API 错误: status=%d seq=%s attempt=%d", resp.status_code, seq, attempt + 1)
+        except Exception as e:
+            log.warning("MiniMax TTS 请求异常: %s seq=%s attempt=%d", e, seq, attempt + 1)
+        await asyncio.sleep(0.5 * (attempt + 1))
+    return None
+
+
+async def _request_tts_audio(text: str, voice: str, *, seq: int | None = None, emotion: str = _DEFAULT_EMOTION) -> bytes | None:
+    from config import get_tts_provider
+    provider = get_tts_provider()
+    if provider == "senseaudio":
+        # SenseAudio 没有 emotion 参数，丢掉
+        return await _request_senseaudio_tts_audio(text, voice, seq=seq)
+    if provider == "minimax":
+        return await _request_minimax_tts_audio(text, voice, seq=seq, emotion=emotion)
     key = get_key("siliconflow")
     if not key:
         log.warning("TTS: 无硅基流动 API Key，跳过合成 seq=%s", seq)
@@ -189,7 +316,7 @@ async def _request_tts_audio(text: str, voice: str, *, seq: int | None = None) -
 
     resp = None
     for attempt in range(3):
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=30, trust_env=False) as client:
             resp = await client.post(
                 "https://api.siliconflow.cn/v1/audio/speech",
                 headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
@@ -322,6 +449,7 @@ class TTSStreamer:
         self._tasks: list[asyncio.Task] = []
         self._segment_paths: dict[int, Path] = {}
         self._merge_segments = merge_segments
+        self._emotion = _DEFAULT_EMOTION  # 由 AI 在回复开头 <emotion>X</emotion> 自标
         self._delete_segments_after_seconds = delete_segments_after_seconds
         self._cache_max_bytes = cache_max_bytes
 
@@ -337,6 +465,16 @@ class TTSStreamer:
 
     def feed(self, chunk: str):
         """喂入 AI 流式 chunk，检测到可切分的句子就异步发起合成"""
+        if not chunk:
+            return
+        # 第一次见到 <emotion>X</emotion> 就锁定 emotion，并从 chunk 里抹掉，避免进 buffer
+        if self._emotion == _DEFAULT_EMOTION:
+            m = _EMOTION_PATTERN.search(chunk)
+            if m:
+                raw = m.group(1).strip().lower()
+                if raw in _VALID_EMOTIONS:
+                    self._emotion = raw
+                    chunk = _EMOTION_PATTERN.sub('', chunk)
         self._buffer += chunk
         self._try_split()
 
@@ -450,7 +588,7 @@ class TTSStreamer:
         """调用硅基流动 TTS 合成 → 保存文件 → WS 推送"""
         chunk_name = f"{safe_id}_s{seq}"
         try:
-            audio_data = await _request_tts_audio(text, self.voice, seq=seq)
+            audio_data = await _request_tts_audio(text, self.voice, seq=seq, emotion=self._emotion)
             if not audio_data:
                 return
 
