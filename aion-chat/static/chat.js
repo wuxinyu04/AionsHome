@@ -1033,21 +1033,28 @@ function changeTTSVoice() {
 async function refreshTTSVoices() {
   try {
     const data = await api("GET", "/api/tts/voices");
+    console.log('TTS voices API response:', JSON.stringify(data, null, 2));
     const sel = $('ttsVoiceSelect');
     if (data.voices && data.voices.length > 0) {
       sel.innerHTML = data.voices.map(v => {
         const name = v.customName || v.uri || 'Unknown';
         return `<option value="${v.uri}" ${v.uri === ttsVoiceId ? 'selected' : ''}>${name}</option>`;
       }).join('');
-      // 如果没有选中的音色，默认选第一个
       if (!ttsVoiceId || !data.voices.find(v => v.uri === ttsVoiceId)) {
         ttsVoiceId = data.voices[0].uri;
         localStorage.setItem('aion_tts_voice', ttsVoiceId);
         sel.value = ttsVoiceId;
         _sendTTSState();
       }
+      // 如果有 note，追加到下拉末尾（disabled，不参与选择）
+      if (data.note) {
+        sel.innerHTML += `<option disabled style="color:#ff8359;font-style:italic">${data.note}</option>`;
+      }
     } else {
       sel.innerHTML = '<option value="">无可用音色</option>';
+      if (data.error) {
+        sel.innerHTML += `<option disabled style="color:#ff8359">❌ ${data.error}</option>`;
+      }
     }
   } catch(e) {
     console.error('刷新TTS音色失败:', e);
@@ -2519,6 +2526,7 @@ function openInNetease(songId) {
 const MUSIC_QUEUE_KEY = 'aion_music_queue_v1';
 const MUSIC_STATE_KEY = 'aion_music_state_v1';
 const MUSIC_LEADER_KEY = 'aion_music_leader_v1';
+const MUSIC_CLOSED_KEY = 'aion_music_closed_v1'; // 持久化 musicClosed,防止页面刷新/重启后 bar 又回来
 let musicQueue = [];          // [{id,name,artist,album,cover,duration}]
 let musicIndex = -1;
 let musicRepeat = 'off';      // off | all | one
@@ -2573,6 +2581,8 @@ function musicLoadPersisted() {
     if (typeof st.shuffle === 'boolean') musicShuffle = st.shuffle;
     if (typeof st.index === 'number' && st.index >= 0 && st.index < musicQueue.length) musicIndex = st.index;
     musicQueue.forEach(s => { if (s && s.id != null) musicSongIndex[s.id] = s; });
+    // 恢复"已关闭"状态:如果上次用户关了,刷新后 bar 也不该出现
+    if (localStorage.getItem(MUSIC_CLOSED_KEY) === '1') musicClosed = true;
   } catch (e) {}
   musicRenderBar();
 }
@@ -2588,6 +2598,7 @@ function musicReadLeader() {
   } catch (e) { return null; }
 }
 function musicClaimLeader() {
+  try { localStorage.removeItem(MUSIC_CLOSED_KEY); } catch (e) {} // 重新播放,清除关门标志
   musicClosed = false; // 用户重新开始播放,清除关门标志
   musicIsLeader = true;
   try { localStorage.setItem(MUSIC_LEADER_KEY, JSON.stringify({ tabId: musicTabId, ts: Date.now() })); } catch (e) {}
@@ -2631,6 +2642,7 @@ function musicOnBCMessage(msg) {
   } else if (msg.type === 'close') {
     // 任意标签关闭了播放器:全员同步关闭
     musicClosed = true;
+    try { localStorage.setItem(MUSIC_CLOSED_KEY, '1'); } catch (e) {} // 持久化
     musicMirrorState = null;
     if (musicIsLeader) {
       // leader 也停止播放并释放身份(用户要的是"完全停止",不是只关镜像)
@@ -2752,6 +2764,7 @@ function musicRenderBar() {
 }
 
 function enqueueMusic(songs, opts) {
+  try { localStorage.removeItem(MUSIC_CLOSED_KEY); } catch (e) {} // 重新加入歌曲,清除关门标志
   musicClosed = false; // 用户重新加入歌曲,清除关门标志
   opts = opts || {};
   const list = Array.isArray(songs) ? songs : (songs ? [songs] : []);
@@ -2867,7 +2880,8 @@ function musicToggleRepeat() {
 }
 function musicToggleShuffle() { musicShuffle = !musicShuffle; musicSaveState(); musicRenderBar(); }
 function musicClose() {
-  musicClosed = true; // 全局关门标志:阻止 BroadcastChannel state 消息重新拉起 mini-bar
+  musicClosed = true;
+  try { localStorage.setItem(MUSIC_CLOSED_KEY, '1'); } catch (e) {} // 持久化:页面刷新/重启后 bar 不会回来
   if (musicAudio) { try { musicAudio.pause(); } catch (e) {} musicAudio.src = ''; }
   musicIndex = -1;
   musicMirrorState = null; // 清掉非 leader 标签的 mirror,否则 musicRenderBar 会因 mirror 残留继续显示 mini-bar
