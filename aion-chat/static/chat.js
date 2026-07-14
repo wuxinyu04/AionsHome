@@ -2599,6 +2599,7 @@ function musicReadLeader() {
 }
 function musicClaimLeader() {
   console.log('[musicClaim] RESET musicClosed=false');
+  console.trace('[musicClaim] call stack');
   try { localStorage.removeItem(MUSIC_CLOSED_KEY); } catch (e) {} // 重新播放,清除关门标志
   musicClosed = false; // 用户重新开始播放,清除关门标志
   musicIsLeader = true;
