@@ -4841,6 +4841,7 @@ function openGeneratedSongPlayer(key) {
   overlay.addEventListener('click', (e) => {
     if (e.target === overlay) closeGeneratedSongPlayer();
   });
+  overlay.querySelector('.song-player-close').onclick = closeGeneratedSongPlayer;
   document.body.appendChild(overlay);
   requestAnimationFrame(() => overlay.classList.add('active'));
 
