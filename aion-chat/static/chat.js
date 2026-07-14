@@ -2598,6 +2598,7 @@ function musicReadLeader() {
   } catch (e) { return null; }
 }
 function musicClaimLeader() {
+  console.log('[musicClaim] RESET musicClosed=false');
   try { localStorage.removeItem(MUSIC_CLOSED_KEY); } catch (e) {} // 重新播放,清除关门标志
   musicClosed = false; // 用户重新开始播放,清除关门标志
   musicIsLeader = true;
@@ -2774,6 +2775,7 @@ function musicRenderBar() {
 }
 
 function enqueueMusic(songs, opts) {
+  console.log('[enqueueMusic] RESET musicClosed=false');
   try { localStorage.removeItem(MUSIC_CLOSED_KEY); } catch (e) {} // 重新加入歌曲,清除关门标志
   musicClosed = false; // 用户重新加入歌曲,清除关门标志
   opts = opts || {};
@@ -2908,6 +2910,7 @@ function musicClose() {
   }
   // 通知其他标签也清掉 mirror(只清它们自己的镜像,不影响 leader 的播放)
   musicBroadcast({ type: 'close', tabId: musicTabId });
+  console.log('[musicClose] DONE, musicClosed=', musicClosed, 'musicIndex=', musicIndex);
 }
 function musicClearQueue() {
   if (!musicQueue.length && musicIndex < 0) return;
