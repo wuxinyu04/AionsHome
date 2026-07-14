@@ -2524,6 +2524,7 @@ let musicIndex = -1;
 let musicRepeat = 'off';      // off | all | one
 let musicShuffle = false;
 let musicAudio = null;        // 单一 <audio>
+let musicClosed = false;      // 用户主动按 ✕ 关闭后置 true,防止 BroadcastChannel state 消息把 bar 重新拉起来
 let musicBarBuilt = false;
 let musicSongIndex = {};      // {songId: songObj} 卡片歌曲反查表
 let musicIsLeader = false;    // 本标签是否持有播放权
@@ -2587,6 +2588,7 @@ function musicReadLeader() {
   } catch (e) { return null; }
 }
 function musicClaimLeader() {
+  musicClosed = false; // 用户重新开始播放,清除关门标志
   musicIsLeader = true;
   try { localStorage.setItem(MUSIC_LEADER_KEY, JSON.stringify({ tabId: musicTabId, ts: Date.now() })); } catch (e) {}
   musicBroadcast({ type: 'leader_claim', tabId: musicTabId });
@@ -2616,8 +2618,8 @@ function musicOnBCMessage(msg) {
   } else if (msg.type === 'leader_claim') {
     if (musicIsLeader) musicDemote();
   } else if (msg.type === 'state') {
-    // leader 推来的状态：非 leader 镜像显示
-    if (!musicIsLeader) {
+    // leader 推来的状态：非 leader 镜像显示(已关闭则跳过)
+    if (!musicIsLeader && !musicClosed) {
       musicQueue = Array.isArray(msg.queue) ? msg.queue : musicQueue;
       if (typeof msg.index === 'number') musicIndex = msg.index;
       musicMirrorState = { songId: msg.songId, name: msg.name, artist: msg.artist, paused: msg.paused, position: msg.position, duration: msg.duration, leader: msg.tabId };
@@ -2627,13 +2629,20 @@ function musicOnBCMessage(msg) {
     // 其他标签/子页请求在此播放
     if (musicIsLeader && msg.song) { playMusicNow(msg.song); }
   } else if (msg.type === 'close') {
-    // 其他标签关闭了播放器:清本地 mirror 并隐藏 mini-bar(仅对非 leader 生效,leader 不受影响)
-    if (!musicIsLeader) {
-      musicMirrorState = null;
-      musicRenderBar();
-      const wrap = document.getElementById('globalMusicWrap');
-      if (wrap) wrap.style.display = 'none';
+    // 任意标签关闭了播放器:全员同步关闭
+    musicClosed = true;
+    musicMirrorState = null;
+    if (musicIsLeader) {
+      // leader 也停止播放并释放身份(用户要的是"完全停止",不是只关镜像)
+      if (musicAudio) { try { musicAudio.pause(); } catch (e) {} musicAudio.src = ''; }
+      musicIndex = -1;
+      musicSaveState();
+      try { localStorage.removeItem(MUSIC_LEADER_KEY); } catch (e) {}
+      musicIsLeader = false;
     }
+    musicRenderBar();
+    const wrap = document.getElementById('globalMusicWrap');
+    if (wrap) wrap.style.display = 'none';
   }
 }
 
@@ -2715,6 +2724,7 @@ function musicRenderBar() {
   if (!musicBarBuilt) return;
   const wrap = document.getElementById('globalMusicWrap');
   if (!wrap) return;
+  if (musicClosed) { wrap.style.display = 'none'; return; } // 用户已关闭,任何渲染都直接隐藏
   const cur = musicCurrent();
   const mirror = (!musicIsLeader && musicMirrorState);
   if (!cur && !mirror) { wrap.style.display = 'none'; return; }
@@ -2742,6 +2752,7 @@ function musicRenderBar() {
 }
 
 function enqueueMusic(songs, opts) {
+  musicClosed = false; // 用户重新加入歌曲,清除关门标志
   opts = opts || {};
   const list = Array.isArray(songs) ? songs : (songs ? [songs] : []);
   list.forEach(s => { if (s && s.id != null) musicSongIndex[s.id] = s; });
@@ -2856,6 +2867,7 @@ function musicToggleRepeat() {
 }
 function musicToggleShuffle() { musicShuffle = !musicShuffle; musicSaveState(); musicRenderBar(); }
 function musicClose() {
+  musicClosed = true; // 全局关门标志:阻止 BroadcastChannel state 消息重新拉起 mini-bar
   if (musicAudio) { try { musicAudio.pause(); } catch (e) {} musicAudio.src = ''; }
   musicIndex = -1;
   musicMirrorState = null; // 清掉非 leader 标签的 mirror,否则 musicRenderBar 会因 mirror 残留继续显示 mini-bar
@@ -2864,6 +2876,11 @@ function musicClose() {
   const wrap = document.getElementById('globalMusicWrap');
   if (wrap) wrap.style.display = 'none';
   musicReportNowPlaying(true); // 清空后端 now_playing
+  // 释放 leader 身份,让其他标签知道这个播放器已彻底关闭
+  if (musicIsLeader) {
+    try { localStorage.removeItem(MUSIC_LEADER_KEY); } catch (e) {}
+    musicIsLeader = false;
+  }
   // 通知其他标签也清掉 mirror(只清它们自己的镜像,不影响 leader 的播放)
   musicBroadcast({ type: 'close', tabId: musicTabId });
 }
