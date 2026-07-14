@@ -1262,6 +1262,10 @@ async def _digest_summarize_group(ai_messages: list, model_key: str) -> dict | N
     for m in (model_key, DEFAULT_MODEL):
         if m and m not in candidates:
             candidates.append(m)
+    # 顶层 wrapper 字段：digest 模型应返回其中至少一个的 dict。
+    # content 字段（"content" in result）会跟单条记忆 dict 冲突，必须排除。
+    _TOP_LEVEL_KEYS = ("memories", "discard_summary", "summary", "diary",
+                       "text", "output", "response", "important_memory")
     for mk in candidates:
         try:
             raw = await simple_ai_call(ai_messages, mk, trace_label="memory_digest_summary", max_tokens=16384)
@@ -1269,9 +1273,11 @@ async def _digest_summarize_group(ai_messages: list, model_key: str) -> dict | N
             print(f"[digest] 模型调用失败({mk})，尝试下一个候选: {e}")
             continue
         result = _parse_json_response(raw)
-        if result:
+        # 仅当 result 含顶层 wrapper 字段时才认；否则视为贪婪匹配错抓了内嵌 item dict。
+        if isinstance(result, dict) and any(k in result for k in _TOP_LEVEL_KEYS):
             return result
-        # JSON 不完整（多半被 max_tokens 截断）—— 抢救已写完的条目，避免整组丢失
+        # JSON 不完整（多半被 max_tokens 截断，或顶层因未转义引号解析失败）——
+        # 用正则从残缺 JSON 里抢救已完整的条目，避免整组丢失。
         recovered = _recover_digest_memory_items_from_text(raw)
         if recovered:
             print(f"[digest] JSON 不完整({mk})，从截断响应中抢救出 {len(recovered)} 条记忆")
