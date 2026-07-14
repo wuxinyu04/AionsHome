@@ -317,6 +317,52 @@ async def _request_edge_tts_audio(text: str, voice: str, *, seq: int | None = No
     return None
 
 
+async def _request_fishaudio_tts_audio(text: str, voice: str, *, seq: int | None = None, emotion: str = _DEFAULT_EMOTION) -> bytes | None:
+    """Fish Audio S2.1 Pro Free 合成。
+    免费档持续到 2026-07 底（无字符上限，受公平使用政策约束）。
+    接口返回原始 MP3 bytes（非 hex）；emotion 参数被上游忽略直接丢弃。
+    voice 字段映射到 reference_id：空字符串时不传，走 Fish Audio 默认声；
+    填了 reference_id 则用用户自己的克隆声。
+    """
+    key = get_key("fishaudio")
+    if not key:
+        log.warning("FishAudio TTS: 无 API Key，跳过合成 seq=%s", seq)
+        return None
+    # 无 voice 时用 Fish Audio 默认声，voice 字段语义是 reference_id
+    payload: dict = {
+        "text": text,
+        "format": "mp3",
+    }
+    if voice:
+        payload["reference_id"] = voice
+    for attempt in range(3):
+        try:
+            async with httpx.AsyncClient(timeout=30, trust_env=True) as client:
+                resp = await client.post(
+                    "https://api.fish.audio/v1/tts",
+                    headers={
+                        "Authorization": f"Bearer {key}",
+                        "Content-Type": "application/json",
+                        "model": "s2.1-pro-free",
+                    },
+                    json=payload,
+                )
+            if resp.status_code == 200:
+                # Fish Audio 直接返回 MP3 bytes（content-type: audio/mpeg）
+                if resp.content:
+                    return resp.content
+                log.warning("FishAudio TTS: 响应为空 seq=%s attempt=%d", seq, attempt + 1)
+            else:
+                # 业务错误以 JSON 返回，截前 200 字记日志方便排错
+                snippet = resp.text[:200] if resp.text else ""
+                log.warning("FishAudio TTS API 错误: status=%d body=%s seq=%s attempt=%d",
+                            resp.status_code, snippet, seq, attempt + 1)
+        except Exception as e:
+            log.warning("FishAudio TTS 请求异常: %s seq=%s attempt=%d", e, seq, attempt + 1)
+        await asyncio.sleep(0.5 * (attempt + 1))
+    return None
+
+
 async def _request_minimax_tts_audio(text: str, voice: str, *, seq: int | None = None, emotion: str = _DEFAULT_EMOTION) -> bytes | None:
     """MiniMax T2A v2 合成。响应里音频是 hex 编码字符串，需 fromhex 解码。"""
     key = get_key("minimax")
@@ -381,6 +427,9 @@ async def _request_tts_audio(text: str, voice: str, *, seq: int | None = None, e
     if provider == "edge":
         # Edge TTS 无 emotion 字段，丢掉；无需 API Key
         return await _request_edge_tts_audio(text, voice, seq=seq)
+    if provider == "fishaudio":
+        # Fish Audio s2.1-pro-free 不支持 emotion 参数，丢掉；走 MP3 bytes 直返
+        return await _request_fishaudio_tts_audio(text, voice, seq=seq, emotion=emotion)
     key = get_key("siliconflow")
     if not key:
         log.warning("TTS: 无硅基流动 API Key，跳过合成 seq=%s", seq)

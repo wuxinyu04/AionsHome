@@ -3,6 +3,8 @@
 """
 
 import json
+import logging
+import traceback
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response, FileResponse
@@ -16,6 +18,8 @@ from tts import cleanup_tts_cache_dir
 from ws import manager
 
 router = APIRouter()
+
+log = logging.getLogger("settings.fishaudio")
 
 RELAY_MODEL_PROVIDERS = {"aipro", "custom_openai"}
 
@@ -41,6 +45,7 @@ class SettingsUpdate(BaseModel):
     aipro_key: Optional[str] = None
     senseaudio_key: Optional[str] = None
     minimax_key: Optional[str] = None
+    fishaudio_key: Optional[str] = None
     tts_provider: Optional[str] = None
     tavily_api_key: Optional[str] = None
     netease_music_u: Optional[str] = None
@@ -101,6 +106,7 @@ async def get_settings():
         "aipro_key": SETTINGS.get("aipro_key", ""),
         "senseaudio_key": SETTINGS.get("senseaudio_key", ""),
         "minimax_key": SETTINGS.get("minimax_key", ""),
+        "fishaudio_key": SETTINGS.get("fishaudio_key", ""),
         "tts_provider": SETTINGS.get("tts_provider", "siliconflow"),
         "tavily_api_key": SETTINGS.get("tavily_api_key", ""),
         "netease_music_u": SETTINGS.get("netease_music_u", ""),
@@ -122,6 +128,7 @@ async def get_settings():
         "aipro_key_masked": mask(SETTINGS.get("aipro_key", "")),
         "senseaudio_key_masked": mask(SETTINGS.get("senseaudio_key", "")),
         "minimax_key_masked": mask(SETTINGS.get("minimax_key", "")),
+        "fishaudio_key_masked": mask(SETTINGS.get("fishaudio_key", "")),
         "tavily_api_key_masked": mask(SETTINGS.get("tavily_api_key", "")),
         "netease_music_u_masked": mask(SETTINGS.get("netease_music_u", "")),
         "sentinel_api_key_masked": mask(SETTINGS.get("sentinel_api_key", "")),
@@ -143,6 +150,8 @@ async def update_settings(body: SettingsUpdate):
         SETTINGS["senseaudio_key"] = body.senseaudio_key
     if body.minimax_key is not None:
         SETTINGS["minimax_key"] = body.minimax_key
+    if body.fishaudio_key is not None:
+        SETTINGS["fishaudio_key"] = body.fishaudio_key
     if body.tts_provider is not None:
         SETTINGS["tts_provider"] = body.tts_provider
     if body.tavily_api_key is not None:
@@ -623,6 +632,129 @@ async def _list_minimax_voices(key: str) -> dict:
     return {"voices": _MINIMAX_SYSTEM_VOICES}
 
 
+# Fish Audio 默认声（不传 reference_id 时 Fish Audio 用的内置声）
+# 永远放第一位，下拉第一项就是它，零配置可用。
+_FISHAUDIO_DEFAULT_VOICE = {"uri": "", "customName": "⭐ Fish Audio 默认声（无 reference_id）"}
+
+
+async def _list_fishaudio_voices(key: str) -> dict:
+    """拉 Fish Audio 公共热门中文声 + 用户自己的克隆声，合并返回。
+
+    端点：GET https://api.fish.audio/model
+    关键参数：
+      - self=False    拿社区公共声音模型（其他用户共享的克隆声）
+      - language=zh   只取中文，避免英文/日文污染下拉
+      - type=tts      排除音乐/ASR 等非 TTS 模型
+      - sort_by=task_count  按调用量降序，热门的优先
+      - page_size=20       一页足够，多了反而翻不完
+
+    /model 同时支持 self=True 拿用户自己的克隆声，单独再调一次合并进来。
+    失败/无权限：只返回默认声选项，避免下拉空白。
+    """
+    try:
+        return await _list_fishaudio_voices_impl(key)
+    except Exception as e:
+        log.exception("FishAudio _list_fishaudio_voices 崩溃")
+        return {"voices": [_FISHAUDIO_DEFAULT_VOICE], "error": f"{type(e).__name__}: {e}"}
+
+
+async def _list_fishaudio_voices_impl(key: str) -> dict:
+    voices: list[dict] = [_FISHAUDIO_DEFAULT_VOICE]
+    notes: list[str] = []
+    seen_ids: set[str] = {""}  # 去重用；空串是"默认声"，已占位
+
+    async def _fetch_models(self_flag: bool, language: str | None, label: str) -> list[dict]:
+        """单次拉一批模型；返回 [{"uri","customName"}] 列表。失败返回 []。"""
+        # 显式拼 query string（不用 httpx params=...，避免 self 这种短 key 被诡异编码）
+        qs_parts = [
+            "page_size=20",
+            "page_number=1",
+            f"self={'true' if self_flag else 'false'}",
+            "type=tts",
+            "sort_by=task_count",
+        ]
+        if language:
+            qs_parts.append(f"language={language}")
+        url = f"https://api.fish.audio/model?{'&'.join(qs_parts)}"
+        log.info("FishAudio 拉%s: %s", label, url)
+        try:
+            async with httpx.AsyncClient(timeout=30, trust_env=True) as client:
+                resp = await client.get(
+                    url,
+                    headers={
+                        "Authorization": f"Bearer {key}",
+                        "model": "s2.1-pro-free",
+                    },
+                )
+            log.info("FishAudio %s响应: status=%d bytes=%d", label, resp.status_code, len(resp.content))
+            if resp.status_code != 200:
+                snippet = resp.text[:160] if resp.text else ""
+                notes.append(f"{label}列表失败({resp.status_code}) {snippet}")
+                return []
+            try:
+                data = resp.json()
+            except Exception as e:
+                notes.append(f"{label}JSON 解析失败：{e}")
+                return []
+            items = data.get("items") if isinstance(data, dict) else data
+            if not isinstance(items, list):
+                notes.append(f"{label}响应里没 items 数组：{type(items).__name__}")
+                return []
+            log.info("FishAudio %s拉到 %d 条", label, len(items))
+            results: list[dict] = []
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                # 只取已训练完成的模型；state 不是 trained 的跳过
+                state = it.get("state", "trained")
+                if state != "trained":
+                    continue
+                ref_id = (
+                    it.get("_id")
+                    or it.get("id")
+                    or it.get("model_id")
+                    or it.get("reference_id")
+                    or ""
+                )
+                if not ref_id or ref_id in seen_ids:
+                    continue
+                seen_ids.add(ref_id)
+                name = (
+                    it.get("title")
+                    or it.get("name")
+                    or it.get("voice_name")
+                    or ref_id
+                )
+                results.append({"uri": ref_id, "customName": str(name)})
+            log.info("FishAudio %s过滤后剩 %d 条", label, len(results))
+            return results
+        except Exception as e:
+            tb = traceback.format_exc()
+            err_line = tb.strip().split('\n')[-1] if tb else str(e)
+            log.warning("FishAudio %s请求异常: %s %s", label, type(e).__name__, e)
+            log.warning("FishAudio %s traceback:\n%s", label, tb)
+            notes.append(f"{label}列表异常：{type(e).__name__}: {e} | {err_line}")
+            return []
+
+    # 1. 社区公共中文热门声（按调用量降序）
+    public_zh = await _fetch_models(self_flag=False, language="zh", label="公共中文声")
+    if public_zh:
+        # 给第一项加 ⭐ 标记，给用户一个直观的热门推荐
+        public_zh[0] = {**public_zh[0], "customName": f"⭐ {public_zh[0]['customName']}（热门）"}
+    voices.extend(public_zh)
+
+    # 2. 用户自己的克隆声（去重逻辑已通过 seen_ids 保证）
+    private = await _fetch_models(self_flag=True, language=None, label="我的克隆声")
+    if private:
+        voices.append({"uri": "__divider__", "customName": "── 我的克隆声 ──"})
+        for it in private:
+            voices.append({**it, "customName": f"👤 {it['customName']}"})
+    elif voices == [_FISHAUDIO_DEFAULT_VOICE]:
+        notes.append("未找到中文公共声和你的克隆声，仅显示默认声")
+
+    return {"voices": voices, **({"note": "; ".join(notes)} if notes else {})}
+
+
 # Edge TTS 精选中文音色（微软 Azure 神经语音，免费无需 key）
 # 直接硬编码 curated 列表，避免去拉全量几百个多语种音色污染下拉。
 # 注意：edge-tts 7.x 实际只有 6 个 zh-CN 音色，其他音色 ID 会 NoAudioReceived 错误。
@@ -645,20 +777,30 @@ async def tts_voice_list():
     if provider == "senseaudio":
         key = get_key("senseaudio")
         if not key:
-            return {"voices": [], "error": "未配置 SenseAudio API Key"}
-        return await _list_senseaudio_voices(key)
+            return {"voices": [], "error": "未配置 SenseAudio API Key", "provider": provider}
+        result = await _list_senseaudio_voices(key)
+        result["provider"] = provider
+        return result
     if provider == "minimax":
         key = get_key("minimax")
         if not key:
-            return {"voices": [], "error": "未配置 MiniMax API Key"}
-        return await _list_minimax_voices(key)
+            return {"voices": [], "error": "未配置 MiniMax API Key", "provider": provider}
+        result = await _list_minimax_voices(key)
+        result["provider"] = provider
+        return result
     if provider == "edge":
-        # 无需 API Key，直接返回 curated 列表
-        return {"voices": _EDGE_SYSTEM_VOICES}
+        return {"voices": _EDGE_SYSTEM_VOICES, "provider": provider}
+    if provider == "fishaudio":
+        key = get_key("fishaudio")
+        if not key:
+            return {"voices": [], "error": "未配置 FishAudio API Key", "provider": provider}
+        result = await _list_fishaudio_voices(key)
+        result["provider"] = provider
+        return result
     # 默认硅基流动
     key = get_key("siliconflow")
     if not key:
-        return {"voices": [], "error": "未配置硅基流动 API Key"}
+        return {"voices": [], "error": "未配置硅基流动 API Key", "provider": provider}
     try:
         async with httpx.AsyncClient(timeout=15, trust_env=False) as client:
             resp = await client.get(
@@ -666,12 +808,11 @@ async def tts_voice_list():
                 headers={"Authorization": f"Bearer {key}"}
             )
         if resp.status_code != 200:
-            return {"voices": [], "error": "获取音色列表失败"}
+            return {"voices": [], "error": "获取音色列表失败", "provider": provider}
         data = resp.json()
         voices = data.get("result") or data.get("voices") or data.get("data") or []
-        # 硅基接口只返回用户克隆音色；账号没克隆过时列表为空，补上系统预置音色作兜底。
         if not voices:
             voices = _COSYVOICE2_SYSTEM_VOICES
-        return {"voices": voices}
+        return {"voices": voices, "provider": provider}
     except Exception as e:
-        return {"voices": [], "error": str(e)}
+        return {"voices": [], "error": str(e), "provider": provider}

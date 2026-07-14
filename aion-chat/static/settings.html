@@ -560,6 +560,7 @@ body[data-theme="light"] .avatar-preview {
             <option value="senseaudio">SenseAudio（senseaudio-tts-1.5，3.5元/万字符）</option>
             <option value="minimax">MiniMax（speech-2.6-turbo，系统音色）</option>
             <option value="edge">Edge TTS（微软神经语音，免费无需 Key）</option>
+            <option value="fishaudio">Fish Audio（S2.1 Pro Free，2026-07 底前免费，中文/克隆声）</option>
           </select>
         </div>
         <div class="field">
@@ -569,6 +570,10 @@ body[data-theme="light"] .avatar-preview {
         <div class="field">
           <label class="form-label">MiniMax API Key（选 MiniMax 时必填）</label>
           <input class="form-input mono-input" type="text" id="minimaxKeyInput" placeholder="platform.minimax.io → Account → API Keys 获取" autocomplete="off">
+        </div>
+        <div class="field">
+          <label class="form-label">Fish Audio API Key（选 Fish Audio 时必填）</label>
+          <input class="form-input mono-input" type="text" id="fishaudioKeyInput" placeholder="fish.audio/app/api-keys 获取，免费档到 2026-07 底" autocomplete="off">
         </div>
         <div class="field">
           <label class="form-label">Tavily API Key（联网搜索）</label>
@@ -1169,6 +1174,7 @@ function collectAntigravityModels() {
   $("ttsProviderSelect").value = s.tts_provider || "siliconflow";
   $("senseaudioKeyInput").value = s.senseaudio_key || "";
   $("minimaxKeyInput").value = s.minimax_key || "";
+  $("fishaudioKeyInput").value = s.fishaudio_key || "";
   $("tavilyApiKeyInput").value = s.tavily_api_key || "";
   $("neteaseMusicUInput").value = s.netease_music_u || "";
   $("neteaseUidInput").value = s.netease_uid || "";
@@ -1215,6 +1221,7 @@ async function saveSettings() {
     tts_provider: $("ttsProviderSelect").value,
     senseaudio_key: $("senseaudioKeyInput").value.trim(),
     minimax_key: $("minimaxKeyInput").value.trim(),
+    fishaudio_key: $("fishaudioKeyInput").value.trim(),
     tavily_api_key: $("tavilyApiKeyInput").value.trim(),
     netease_music_u: $("neteaseMusicUInput").value.trim(),
     netease_uid: $("neteaseUidInput").value.trim(),

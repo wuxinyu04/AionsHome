@@ -44,7 +44,7 @@ def load_settings():
     if SETTINGS_PATH.exists():
         with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
             return json.load(f)
-    keys = {"gemini_key": "", "siliconflow_key": "", "gemini_free_key": "", "aipro_key": "", "minimax_key": ""}
+    keys = {"gemini_key": "", "siliconflow_key": "", "gemini_free_key": "", "aipro_key": "", "minimax_key": "", "fishaudio_key": ""}
     txt = BASE_DIR.parent / "所需要的API.txt"
     if txt.exists():
         with open(txt, "r", encoding="utf-8") as f:
@@ -73,12 +73,15 @@ def get_key(provider: str) -> str:
         return SETTINGS.get("senseaudio_key", "")
     if provider == "minimax":
         return SETTINGS.get("minimax_key", "")
+    if provider == "fishaudio":
+        return SETTINGS.get("fishaudio_key", "")
     return SETTINGS.get("siliconflow_key", "")
 
 
 def get_tts_provider() -> str:
-    """返回当前 TTS 服务商：siliconflow（默认）/ senseaudio / minimax / edge。
-    edge 为微软 Azure 神经语音免费逆向接口，无需 API Key。"""
+    """返回当前 TTS 服务商：siliconflow（默认）/ senseaudio / minimax / edge / fishaudio。
+    edge 为微软 Azure 神经语音免费逆向接口，无需 API Key。
+    fishaudio 走 Fish Audio S2.1 Pro Free（2026-07 底前免费）。"""
     return (SETTINGS.get("tts_provider", "") or "siliconflow").strip()
 
 def get_sentinel_config() -> dict:
