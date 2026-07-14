@@ -2696,13 +2696,23 @@ function musicEnsureBar() {
   audio.volume = (parseInt(localStorage.getItem('musicVolume') ?? '50')) / 100;
   musicAudio = audio;
 
-  wrap.querySelector('.mb-play').onclick = musicTogglePlay;
+  wrap.querySelector('.mb-play').onclick = function(e) {
+	console.log('[musicToggle] ▶ clicked, paused=', musicAudio ? musicAudio.paused : 'no audio');
+	musicTogglePlay();
+};
   wrap.querySelector('.mb-prev').onclick = musicPrev;
   wrap.querySelector('.mb-next').onclick = musicNext;
   wrap.querySelector('.mb-repeat').onclick = musicToggleRepeat;
   wrap.querySelector('.mb-shuffle').onclick = musicToggleShuffle;
   wrap.querySelector('.mb-expand').onclick = () => { if (typeof openMusicPlayer === 'function') openMusicPlayer(); };
-  wrap.querySelector('.mb-close').onclick = musicClose;
+  wrap.querySelector('.mb-close').onclick = function(e) {
+	console.log('[musicClose] ✕ clicked, musicClosed=', musicClosed, 'musicIndex=', musicIndex, 'musicIsLeader=', musicIsLeader);
+	e.stopPropagation(); // 防止事件冒泡到父元素
+	// 直接停 audio + 隐藏 bar(兜底),再调 musicClose 做完整清理
+	if (musicAudio) { try { musicAudio.pause(); } catch (e) {} musicAudio.src = ''; }
+	wrap.style.display = 'none';
+	musicClose();
+};
   const bar = wrap.querySelector('.mb-bar');
   bar.oninput = () => { if (musicIsLeader && musicAudio && musicAudio.duration) musicAudio.currentTime = (bar.value / 1000) * musicAudio.duration; };
   const vol = wrap.querySelector('.mb-vol');
