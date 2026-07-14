@@ -1865,15 +1865,18 @@ async def simple_ai_call(
     temperature: float | None = None,
     *,
     trace_label: str = "simple_ai_call",
+    max_tokens: int | None = None,
 ) -> str:
-    """收集 stream_ai 的全部 chunk并留存三天原始响应，返回过滤状态行后的正文。"""
+    """收集 stream_ai 的全部 chunk并留存三天原始响应，返回过滤状态行后的正文。
+    max_tokens 透传给 stream_ai；思考模型的 reasoning_content 会吃掉部分额度，
+    调用结构化/JSON 任务时务必显式传一个足够大的值（推荐 16384）。"""
     model_key = resolve_model_key(model_key)
     started_at = time.time()
     full_text = ""
     raw_chunks = []
     error = ""
     try:
-        async for chunk in stream_ai(messages, model_key, temperature=temperature):
+        async for chunk in stream_ai(messages, model_key, temperature=temperature, max_tokens=max_tokens):
             raw_chunks.append(chunk)
             if chunk.startswith(CLI_STATUS_PREFIX):
                 continue
