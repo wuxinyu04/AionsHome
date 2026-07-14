@@ -2626,6 +2626,14 @@ function musicOnBCMessage(msg) {
   } else if (msg.type === 'request_play') {
     // 其他标签/子页请求在此播放
     if (musicIsLeader && msg.song) { playMusicNow(msg.song); }
+  } else if (msg.type === 'close') {
+    // 其他标签关闭了播放器:清本地 mirror 并隐藏 mini-bar(仅对非 leader 生效,leader 不受影响)
+    if (!musicIsLeader) {
+      musicMirrorState = null;
+      musicRenderBar();
+      const wrap = document.getElementById('globalMusicWrap');
+      if (wrap) wrap.style.display = 'none';
+    }
   }
 }
 
@@ -2849,8 +2857,15 @@ function musicToggleRepeat() {
 function musicToggleShuffle() { musicShuffle = !musicShuffle; musicSaveState(); musicRenderBar(); }
 function musicClose() {
   if (musicAudio) { try { musicAudio.pause(); } catch (e) {} musicAudio.src = ''; }
-  musicIndex = -1; musicSaveState(); musicRenderBar();
+  musicIndex = -1;
+  musicMirrorState = null; // 清掉非 leader 标签的 mirror,否则 musicRenderBar 会因 mirror 残留继续显示 mini-bar
+  musicSaveState(); musicRenderBar();
+  // 兜底:任何情况下都强制隐藏 mini-bar(防止 mirror 状态/渲染分支判断漏掉)
+  const wrap = document.getElementById('globalMusicWrap');
+  if (wrap) wrap.style.display = 'none';
   musicReportNowPlaying(true); // 清空后端 now_playing
+  // 通知其他标签也清掉 mirror(只清它们自己的镜像,不影响 leader 的播放)
+  musicBroadcast({ type: 'close', tabId: musicTabId });
 }
 function musicClearQueue() {
   if (!musicQueue.length && musicIndex < 0) return;
@@ -3345,6 +3360,7 @@ function loadPlaylistTracks(pid, name) {
 
 function closeMusicPlayer() {
   if (musicPlayerOverlay) { musicPlayerOverlay.remove(); musicPlayerOverlay = null; }
+  musicClose(); // 复用统一的关停逻辑:停 audio + 清 mirror + 兜底 hide mini-bar + 上报后端 + 广播 close
 }
 
 // ── 对话 ──
