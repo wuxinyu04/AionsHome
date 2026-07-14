@@ -77,7 +77,8 @@ def get_key(provider: str) -> str:
 
 
 def get_tts_provider() -> str:
-    """返回当前 TTS 服务商：siliconflow（默认）或 senseaudio。"""
+    """返回当前 TTS 服务商：siliconflow（默认）/ senseaudio / minimax / edge。
+    edge 为微软 Azure 神经语音免费逆向接口，无需 API Key。"""
     return (SETTINGS.get("tts_provider", "") or "siliconflow").strip()
 
 def get_sentinel_config() -> dict:
