@@ -2706,11 +2706,11 @@ function musicEnsureBar() {
   wrap.querySelector('.mb-shuffle').onclick = musicToggleShuffle;
   wrap.querySelector('.mb-expand').onclick = () => { if (typeof openMusicPlayer === 'function') openMusicPlayer(); };
   wrap.querySelector('.mb-close').onclick = function(e) {
-	console.log('[musicClose] ✕ clicked, musicClosed=', musicClosed, 'musicIndex=', musicIndex, 'musicIsLeader=', musicIsLeader);
+	console.log('[musicClose] ✕ clicked, musicClosed=', musicClosed, 'musicIndex=', musicIndex);
 	e.stopPropagation(); // 防止事件冒泡到父元素
-	// 直接停 audio + 隐藏 bar(兜底),再调 musicClose 做完整清理
-	if (musicAudio) { try { musicAudio.pause(); } catch (e) {} musicAudio.src = ''; }
-	wrap.style.display = 'none';
+	e.preventDefault();
+	// 不在这里直接 hide DOM,否则浏览器会在 click 事件处理中重新分发到其他元素
+	// 隐藏交给 musicClose → musicRenderBar 处理
 	musicClose();
 };
   const bar = wrap.querySelector('.mb-bar');
@@ -2829,6 +2829,7 @@ function musicPlayIndex(idx, autoplay) {
 }
 
 function musicTogglePlay() {
+  if (musicClosed) return; // 用户已关闭播放器,阻止任何意外触发(包括 click 重分发)
   // 镜像模式：本标签非 leader → 接管播放权，从镜像位置续播
   if (!musicIsLeader) {
     musicClaimLeader();
