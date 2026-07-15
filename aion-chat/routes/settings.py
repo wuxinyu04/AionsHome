@@ -637,19 +637,29 @@ async def _list_minimax_voices(key: str) -> dict:
 _FISHAUDIO_DEFAULT_VOICE = {"uri": "", "customName": "⭐ Fish Audio 默认声（无 reference_id）"}
 
 
+# Fish Audio 男友陪伴向精选中文男声（社区公共声，按男友相关度人工筛过）
+# 筛选标准（与 [[ai-voice-design-boyfriend-young]] 偏好一致）：
+#   - 必须男 + young + Mandarin/Chinese
+#   - 描述里不含 middle-aged/old/elderly（tag 不可信，靠 description 兜底）
+#   - 排除明星克隆声（用户明确不要明星）
+#   - 排除游戏/说教向（energetic/gaming/authoritative/firm）
+#   - 优先 gentle/soft/warm/calm/relaxed/smooth/sincere
+#   - 沉稳低音炮 OK，但不要中年大叔/老年
+# 注：Fish Audio 公共库 350 条样本里非明星 + 男友向只有这 3 条能打；
+# 想要更多/更定制化，用 fish.audio 平台的 Voice Design（prompt 生成）或上传参考音频克隆。
+_FISHAUDIO_CURATED_VOICES = [
+    {"uri": "4ddfa1f451f04d85b809dcad9d76e91f", "customName": "⭐ 舒服的男声（温柔温暖·平稳磁性，男友首选）"},
+    {"uri": "12abd39fe3c04610ae842815513c03b0", "customName": "男1（温暖沉稳·vlog 日常感）"},
+    {"uri": "04f85f222e044a928eea79f5655f1d54", "customName": "熊猫2号（自然清爽·放松友好）"},
+]
+
+
 async def _list_fishaudio_voices(key: str) -> dict:
-    """拉 Fish Audio 公共热门中文声 + 用户自己的克隆声，合并返回。
+    """返回 Fish Audio 精选男友向中文男声 + 用户自己的克隆声。
 
-    端点：GET https://api.fish.audio/model
-    关键参数：
-      - self=False    拿社区公共声音模型（其他用户共享的克隆声）
-      - language=zh   只取中文，避免英文/日文污染下拉
-      - type=tts      排除音乐/ASR 等非 TTS 模型
-      - sort_by=task_count  按调用量降序，热门的优先
-      - page_size=20       一页足够，多了反而翻不完
-
-    /model 同时支持 self=True 拿用户自己的克隆声，单独再调一次合并进来。
-    失败/无权限：只返回默认声选项，避免下拉空白。
+    精选列表是硬编码的 6 条社区公共声（按男友陪伴向人工筛过，见 _FISHAUDIO_CURATED_VOICES），
+    不再去拉热门榜--热门榜里充斥游戏向/说教向/中年声，不符合项目男友陪伴定位。
+    用户在 fish.audio 平台创建的克隆声会追加在后面（self=true 拉取）。
     """
     try:
         return await _list_fishaudio_voices_impl(key)
@@ -659,98 +669,40 @@ async def _list_fishaudio_voices(key: str) -> dict:
 
 
 async def _list_fishaudio_voices_impl(key: str) -> dict:
-    voices: list[dict] = [_FISHAUDIO_DEFAULT_VOICE]
+    # 1. 默认声 + 精选男友向中文男声（硬编码，不依赖网络）
+    voices: list[dict] = [_FISHAUDIO_DEFAULT_VOICE] + list(_FISHAUDIO_CURATED_VOICES)
     notes: list[str] = []
-    seen_ids: set[str] = {""}  # 去重用；空串是"默认声"，已占位
 
-    async def _fetch_models(self_flag: bool, language: str | None, label: str) -> list[dict]:
-        """单次拉一批模型；返回 [{"uri","customName"}] 列表。失败返回 []。"""
-        # 显式拼 query string（不用 httpx params=...，避免 self 这种短 key 被诡异编码）
-        qs_parts = [
-            "page_size=20",
-            "page_number=1",
-            f"self={'true' if self_flag else 'false'}",
-            "type=tts",
-            "sort_by=task_count",
-        ]
-        if language:
-            qs_parts.append(f"language={language}")
-        url = f"https://api.fish.audio/model?{'&'.join(qs_parts)}"
-        log.info("FishAudio 拉%s: %s", label, url)
-        try:
-            async with httpx.AsyncClient(timeout=30, trust_env=True) as client:
-                resp = await client.get(
-                    url,
-                    headers={
-                        "Authorization": f"Bearer {key}",
-                        "model": "s2.1-pro-free",
-                    },
-                )
-            log.info("FishAudio %s响应: status=%d bytes=%d", label, resp.status_code, len(resp.content))
-            if resp.status_code != 200:
-                snippet = resp.text[:160] if resp.text else ""
-                notes.append(f"{label}列表失败({resp.status_code}) {snippet}")
-                return []
-            try:
-                data = resp.json()
-            except Exception as e:
-                notes.append(f"{label}JSON 解析失败：{e}")
-                return []
+    # 2. 用户自己的克隆声（self=true 拉取，失败静默跳过）
+    seen_ids: set[str] = {v["uri"] for v in voices}
+    try:
+        async with httpx.AsyncClient(timeout=15, trust_env=True) as client:
+            resp = await client.get(
+                "https://api.fish.audio/model?page_size=20&page_number=1&self=true&type=tts&sort_by=task_count",
+                headers={"Authorization": f"Bearer {key}", "model": "s2.1-pro-free"},
+            )
+        if resp.status_code == 200:
+            data = resp.json()
             items = data.get("items") if isinstance(data, dict) else data
-            if not isinstance(items, list):
-                notes.append(f"{label}响应里没 items 数组：{type(items).__name__}")
-                return []
-            log.info("FishAudio %s拉到 %d 条", label, len(items))
-            results: list[dict] = []
-            for it in items:
-                if not isinstance(it, dict):
-                    continue
-                # 只取已训练完成的模型；state 不是 trained 的跳过
-                state = it.get("state", "trained")
-                if state != "trained":
-                    continue
-                ref_id = (
-                    it.get("_id")
-                    or it.get("id")
-                    or it.get("model_id")
-                    or it.get("reference_id")
-                    or ""
-                )
-                if not ref_id or ref_id in seen_ids:
-                    continue
-                seen_ids.add(ref_id)
-                name = (
-                    it.get("title")
-                    or it.get("name")
-                    or it.get("voice_name")
-                    or ref_id
-                )
-                results.append({"uri": ref_id, "customName": str(name)})
-            log.info("FishAudio %s过滤后剩 %d 条", label, len(results))
-            return results
-        except Exception as e:
-            tb = traceback.format_exc()
-            err_line = tb.strip().split('\n')[-1] if tb else str(e)
-            log.warning("FishAudio %s请求异常: %s %s", label, type(e).__name__, e)
-            log.warning("FishAudio %s traceback:\n%s", label, tb)
-            notes.append(f"{label}列表异常：{type(e).__name__}: {e} | {err_line}")
-            return []
-
-    # 1. 社区公共中文热门声（按调用量降序）
-    public_zh = await _fetch_models(self_flag=False, language="zh", label="公共中文声")
-    if public_zh:
-        # 给第一项加 ⭐ 标记，给用户一个直观的热门推荐
-        public_zh[0] = {**public_zh[0], "customName": f"⭐ {public_zh[0]['customName']}（热门）"}
-    voices.extend(public_zh)
-
-    # 2. 用户自己的克隆声（去重逻辑已通过 seen_ids 保证）
-    private = await _fetch_models(self_flag=True, language=None, label="我的克隆声")
-    if private:
-        voices.append({"uri": "__divider__", "customName": "── 我的克隆声 ──"})
-        for it in private:
-            voices.append({**it, "customName": f"👤 {it['customName']}"})
-    elif voices == [_FISHAUDIO_DEFAULT_VOICE]:
-        notes.append("未找到中文公共声和你的克隆声，仅显示默认声")
+            if isinstance(items, list):
+                private: list[dict] = []
+                for it in items:
+                    if not isinstance(it, dict) or it.get("state", "trained") != "trained":
+                        continue
+                    ref_id = it.get("_id") or it.get("id") or it.get("model_id") or ""
+                    if not ref_id or ref_id in seen_ids:
+                        continue
+                    seen_ids.add(ref_id)
+                    name = it.get("title") or it.get("name") or ref_id
+                    private.append({"uri": ref_id, "customName": f"👤 {name}"})
+                if private:
+                    voices.append({"uri": "__divider__", "customName": "── 我的克隆声 ──"})
+                    voices.extend(private)
+        else:
+            notes.append(f"克隆声列表拉取失败({resp.status_code})")
+    except Exception as e:
+        # 克隆声拉取失败不影响精选列表
+        notes.append(f"克隆声列表异常：{type(e).__name__}: {e}")
 
     return {"voices": voices, **({"note": "; ".join(notes)} if notes else {})}
 

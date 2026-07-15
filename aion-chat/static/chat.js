@@ -2598,8 +2598,6 @@ function musicReadLeader() {
   } catch (e) { return null; }
 }
 function musicClaimLeader() {
-  console.log('[musicClaim] RESET musicClosed=false');
-  console.trace('[musicClaim] call stack');
   try { localStorage.removeItem(MUSIC_CLOSED_KEY); } catch (e) {} // 重新播放,清除关门标志
   musicClosed = false; // 用户重新开始播放,清除关门标志
   musicIsLeader = true;
@@ -2698,17 +2696,13 @@ function musicEnsureBar() {
   audio.volume = (parseInt(localStorage.getItem('musicVolume') ?? '50')) / 100;
   musicAudio = audio;
 
-  wrap.querySelector('.mb-play').onclick = function(e) {
-	console.log('[musicToggle] ▶ clicked, paused=', musicAudio ? musicAudio.paused : 'no audio');
-	musicTogglePlay();
-};
+  wrap.querySelector('.mb-play').onclick = musicTogglePlay;
   wrap.querySelector('.mb-prev').onclick = musicPrev;
   wrap.querySelector('.mb-next').onclick = musicNext;
   wrap.querySelector('.mb-repeat').onclick = musicToggleRepeat;
   wrap.querySelector('.mb-shuffle').onclick = musicToggleShuffle;
   wrap.querySelector('.mb-expand').onclick = () => { if (typeof openMusicPlayer === 'function') openMusicPlayer(); };
   wrap.querySelector('.mb-close').onclick = function(e) {
-	console.log('[musicClose] ✕ clicked, musicClosed=', musicClosed, 'musicIndex=', musicIndex);
 	e.stopPropagation(); // 防止事件冒泡到父元素
 	e.preventDefault();
 	// 不在这里直接 hide DOM,否则浏览器会在 click 事件处理中重新分发到其他元素
@@ -2776,7 +2770,6 @@ function musicRenderBar() {
 }
 
 function enqueueMusic(songs, opts) {
-  console.log('[enqueueMusic] RESET musicClosed=false');
   try { localStorage.removeItem(MUSIC_CLOSED_KEY); } catch (e) {} // 重新加入歌曲,清除关门标志
   musicClosed = false; // 用户重新加入歌曲,清除关门标志
   opts = opts || {};
@@ -2854,6 +2847,7 @@ function musicTogglePlay() {
 }
 
 function musicOnEnded() {
+  if (musicClosed) return; // 用户已关闭播放器,阻止 onerror->musicNext 链把下一首拉起来
   if (musicRepeat === 'one') {
     if (musicAudio) { musicAudio.currentTime = 0; musicAudio.play().catch(() => {}); }
     return;
@@ -2911,7 +2905,6 @@ function musicClose() {
   }
   // 通知其他标签也清掉 mirror(只清它们自己的镜像,不影响 leader 的播放)
   musicBroadcast({ type: 'close', tabId: musicTabId });
-  console.log('[musicClose] DONE, musicClosed=', musicClosed, 'musicIndex=', musicIndex);
 }
 function musicClearQueue() {
   if (!musicQueue.length && musicIndex < 0) return;
